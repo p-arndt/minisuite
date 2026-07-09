@@ -243,7 +243,8 @@ impl BuiltResponse {
             write!(w, "Date: {}\r\n", crate::util::http_date_now())?;
         }
         if !have_server {
-            write!(w, "Server: minicloak/0.1\r\n")?;
+            // Taken from Cargo.toml, so `just release` cannot leave it stale.
+            write!(w, "Server: minicloak/{}\r\n", env!("CARGO_PKG_VERSION"))?;
         }
         write!(w, "\r\n")?;
         match self.body {
@@ -357,7 +358,7 @@ mod tests {
         assert!(out.starts_with("HTTP/1.1 204 No Content\r\n"));
         assert!(out.contains("Content-Length: 0\r\n"));
         assert!(out.contains("Connection: close\r\n"));
-        assert!(out.contains("Server: minicloak/0.1\r\n"));
+        assert!(out.contains(&format!("Server: minicloak/{}\r\n", env!("CARGO_PKG_VERSION"))));
         // No Content-Type default.
         assert!(!out.to_ascii_lowercase().contains("content-type:"));
     }

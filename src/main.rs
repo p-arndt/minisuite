@@ -66,6 +66,7 @@ Usage: minicloak [options]
   --no-quick-login         disable the password-less user buttons on the login page
   --no-cors                do not send CORS headers
   -h, --help               show this help
+  -V, --version            print the version and exit
 
 A client secret of `public` (or an empty one) marks a public client, which must use PKCE.
 A redirect URI may end in `/*` to allow any path below it, or be exactly `*` to allow any URI.";
@@ -163,6 +164,10 @@ fn parse_args() -> Config {
             "--no-cors" => cfg.cors = false,
             "-h" | "--help" => {
                 println!("{}", HELP);
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("minicloak {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             _ => fail(&format!("unknown argument: {}", a)),
