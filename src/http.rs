@@ -358,7 +358,10 @@ mod tests {
         assert!(out.starts_with("HTTP/1.1 204 No Content\r\n"));
         assert!(out.contains("Content-Length: 0\r\n"));
         assert!(out.contains("Connection: close\r\n"));
-        assert!(out.contains(&format!("Server: minicloak/{}\r\n", env!("CARGO_PKG_VERSION"))));
+        assert!(out.contains(&format!(
+            "Server: minicloak/{}\r\n",
+            env!("CARGO_PKG_VERSION")
+        )));
         // No Content-Type default.
         assert!(!out.to_ascii_lowercase().contains("content-type:"));
     }

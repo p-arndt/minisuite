@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: fmt + clippy + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      # No dependencies to fetch and no system libraries to install: minicloak
+      # builds from std alone on every platform.
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  smoke:
+    name: end-to-end (smoketest.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Drives the real HTTP surface and re-verifies every RS256 signature in
+      # Python against the published JWKS, so a bug in minicloak's own crypto
+      # cannot make this pass.
+      - name: Build and run the end-to-end suite
+        run: |
+          cargo build --release
+          ./target/release/minicloak --bind 127.0.0.1:19500 &
+          server=$!
+          trap "kill $server 2>/dev/null || true" EXIT
+          sleep 1
+          python smoketest.py http://127.0.0.1:19500
+
+  interop:
+    name: openssl accepts our keys and signatures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      # The RSA implementation is hand-written. Check it against an independent
+      # one: openssl must accept both the generated key and its signatures.
+      - name: Generate a key, sign, verify with openssl
+        run: |
+          cargo build --release
+          ./target/release/minicloak --bind 127.0.0.1:19600 --key key.pem &
+          server=$!
+          trap "kill $server 2>/dev/null || true" EXIT
+          sleep 2
+
+          echo "--- openssl rsa -check (p*q == n, d, CRT parameters) ---"
+          openssl rsa -in key.pem -check -noout
+
+          echo "--- openssl verifies a token minted by minicloak ---"
+          openssl rsa -in key.pem -pubout -out pub.pem 2>/dev/null
+          TOKEN=$(curl -s -X POST http://127.0.0.1:19600/token \
+            -d grant_type=client_credentials -d client_id=myapp -d client_secret=s3cret \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+          python3 - "$TOKEN" <<'PY'
+          import base64, sys
+          token = sys.argv[1]
+          signing_input, sig_b64 = token.rsplit(".", 1)
+          open("jwt_input.bin", "wb").write(signing_input.encode())
+          open("jwt_sig.bin", "wb").write(base64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4)))
+          PY
+          openssl dgst -sha256 -verify pub.pem -signature jwt_sig.bin jwt_input.bin

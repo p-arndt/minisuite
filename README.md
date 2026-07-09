@@ -49,6 +49,12 @@ endpoint, so anything that can validate a standard signature (Spring Security,
 
 ## Install
 
+Grab a binary from the [releases page](https://github.com/p-arndt/minicloak/releases)
+— Linux (x86_64 / aarch64, static musl), Windows (x86_64) and macOS (Apple silicon
+/ Intel). There is nothing to install alongside it.
+
+Or build from source:
+
 ```bash
 git clone https://github.com/p-arndt/minicloak
 cd minicloak
@@ -58,6 +64,13 @@ cargo build --release
 The resulting `target/release/minicloak` is self-contained.
 
 ### Docker
+
+```bash
+docker pull ghcr.io/p-arndt/minicloak:latest
+docker run --rm -p 9500:9500 -v minicloak-data:/data ghcr.io/p-arndt/minicloak:latest
+```
+
+Or build the image yourself:
 
 ```bash
 docker build -t minicloak .
@@ -141,6 +154,7 @@ Usage: minicloak [options]
   --no-quick-login         disable the password-less user buttons on the login page
   --no-cors                do not send CORS headers
   -h, --help               show this help
+  -V, --version            print the version and exit
 
 A client secret of `public` (or an empty one) marks a public client, which must use PKCE.
 A redirect URI may end in `/*` to allow any path below it, or be exactly `*` to allow any URI.
@@ -340,6 +354,30 @@ independently in Python (plain integer arithmetic against the published JWKS),
 so a bug in minicloak's own crypto cannot make the suite pass. Start a server
 first, or use `just smoke`, which builds, launches one on port 19500, runs the
 suite and shuts it down.
+
+`just ci` runs the whole gate locally — the same one `.github/workflows/ci.yml`
+runs on Linux, Windows and macOS. CI additionally checks the hand-written RSA
+against OpenSSL: `openssl rsa -check` must accept the generated key, and
+`openssl dgst -verify` must accept a token minted by minicloak.
+
+## Releasing
+
+The version lives in exactly one place, the `version` key of `[package]` in
+`Cargo.toml`; the binary reads it back through `env!("CARGO_PKG_VERSION")` for
+`--version` and its `Server:` header.
+
+```bash
+just version                 # print the current version
+just set-version 0.2.0       # stamp it, without committing
+just release                 # patch bump -> commit, tag v0.1.1, push
+just release minor           # or: major, or an explicit 1.0.0
+```
+
+`just release` refuses to run on a dirty tree, so the release commit contains
+only the version bump. Pushing the tag triggers the "Build and Publish Release"
+workflow, which builds the binaries for every target, attaches them to a GitHub
+release along with notes generated from the commit log, and pushes the
+multi-arch container image to `ghcr.io`.
 
 ## License
 

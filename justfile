@@ -10,6 +10,8 @@
 set shell := ["bash", "-cu"]
 set windows-shell := ["bash", "-cu"]
 
+alias lint := clippy
+
 # Default: show the recipe list.
 default:
     @just --list
@@ -38,6 +40,10 @@ test:
 fmt:
     cargo fmt --all
 
+# Verify formatting without changing files (CI gate).
+fmt-check:
+    cargo fmt --all --check
+
 # Lint with clippy (warnings as errors).
 clippy:
     cargo clippy --all-targets -- -D warnings
@@ -52,6 +58,9 @@ smoke:
     sleep 1; \
     python smoketest.py http://127.0.0.1:19500
 
+# The full local CI gate — mirrors .github/workflows/ci.yml. Run before pushing.
+ci: fmt-check clippy test smoke
+
 # ---------------------------------------------------------------------------
 # Docker
 # ---------------------------------------------------------------------------
@@ -59,3 +68,25 @@ smoke:
 # Build the scratch image locally.
 docker:
     docker build -t minicloak:dev .
+
+# ---------------------------------------------------------------------------
+# Publish
+# ---------------------------------------------------------------------------
+
+# Print the current version (from Cargo.toml).
+version:
+    @node -e "import('./scripts/set-version.mjs').then(m => console.log(m.readVersion()))"
+
+# Stamp a version into Cargo.toml WITHOUT committing. Accepts a bump keyword or
+# an explicit version:
+#   just set-version patch        just set-version 0.2.0
+set-version bump="patch":
+    node scripts/set-version.mjs {{bump}}
+
+# Cut a release: bump the version (patch|minor|major, or explicit x.y.z), refresh
+# Cargo.lock, commit, tag `v<x.y.z>`, and push -> triggers the "Build and Publish
+# Release" workflow (Linux, Windows, macOS binaries + container image). Refuses to
+# run on a dirty tree.
+#   just release            just release minor            just release 1.0.0
+release bump="patch":
+    node scripts/release.mjs {{bump}}
