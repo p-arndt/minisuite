@@ -140,10 +140,9 @@ Usage: minicloak [options]
   --bind ADDR              default 127.0.0.1:9500
   --realm NAME             default dev
   --issuer URL             override the issuer (default: http://<Host header>/realms/<realm>)
-  --users FILE             load users: username=password:email:name:role1,role2
-  --clients FILE           load clients: client_id=secret:redirect_uri[,uri...]
-  --user SPEC              add one user inline (repeatable)
-  --client SPEC            add one client inline (repeatable)
+  --config FILE            load users and clients from a TOML file
+  --user SPEC              add one user inline: username=password:email:name:role1,role2
+  --client SPEC            add one client inline: client_id=secret:redirect_uri[,uri...]
   --key FILE               RSA private key PEM; generated and written if absent
   --key-bits N             key size when generating, default 2048
   --access-ttl SECS        access token lifetime, default 300
@@ -156,7 +155,9 @@ Usage: minicloak [options]
   -h, --help               show this help
   -V, --version            print the version and exit
 
-A client secret of `public` (or an empty one) marks a public client, which must use PKCE.
+In the config file a client sets exactly one of `secret = "..."` or `public = true`.
+An inline --client spec marks a public client with the secret `public`, or an empty one.
+A public client must use PKCE.
 A redirect URI may end in `/*` to allow any path below it, or be exactly `*` to allow any URI.
 ```
 
@@ -169,10 +170,10 @@ lifetime:
 minicloak --key ./key.pem --access-ttl 3600
 ```
 
-Load users and clients from files, skip the login form entirely (handy in CI):
+Load users and clients from a config file, skip the login form entirely (handy in CI):
 
 ```bash
-minicloak --users users.txt --clients clients.txt --auto-login alice
+minicloak --config minicloak.toml --auto-login alice
 ```
 
 Add a user and a client inline, without a file:
@@ -183,54 +184,83 @@ minicloak \
   --client "cli=topsecret:http://localhost:8080/*"
 ```
 
-## Configuration files
+## Configuration file
 
-Both files are plain text: one record per line, `#` starts a comment, blank
-lines are ignored. The same grammar is accepted inline via `--user` / `--client`.
+`--config FILE` loads every user and client from one TOML file. The field names
+deliberately mirror the **Keycloak admin console**, since that is what most users
+are migrating from. See [`minicloak.example.toml`](minicloak.example.toml).
 
-### Users (`--users`)
+```toml
+# minicloak.toml
 
+[users.alice]
+password   = "alice"
+email      = "alice@example.com"
+first_name = "Alice"
+last_name  = "Admin"
+roles      = ["admin", "staff"]
+
+# password only — email, name and roles are all optional
+[users.carol]
+password = "carolpass"
+
+# a username containing a dot or an '@' needs a quoted key
+[users."ada@example.com"]
+password = "adapass"
+
+[clients.myapp]
+secret        = "s3cret"
+redirect_uris = ["http://localhost:3000/*"]
+
+[clients.spa]
+public        = true
+redirect_uris = ["http://localhost:5173/*", "http://localhost:5174/callback"]
 ```
-username = password : email : name : role1,role2
-```
 
-Everything after `password` is optional. Split on the first `:` for the
-password, then email, then display name, then a comma-separated role list. The
-display name is split on its first space into `given_name` / `family_name`.
+### Users
 
-Fields are trimmed, so you may align the columns. A `#` only starts a comment at
-the beginning of a line — it is a legal password character anywhere else.
+`password` is required. `email`, `first_name`, `last_name` and `roles` are all
+optional. `first_name` / `last_name` map to the `given_name` / `family_name`
+claims, and the `name` claim is derived as `"First Last"`. A username containing
+a dot or an `@` needs a quoted key: `[users."ada@example.com"]`.
 
-```
-# users.txt
-alice = alice     : alice@example.com : Alice Admin : admin,staff
-bob   = bob       : bob@example.com   : Bob Dev     : staff
-carol = carolpass
-dave  = davepass  : dave@example.com
-```
+### Clients
 
-`carol` has no email, name or roles; `dave` has an email only.
-
-### Clients (`--clients`)
-
-```
-client_id = secret : redirect_uri[,redirect_uri...]
-```
-
-The value is split on its **first** `:` only, so redirect URIs keep their own
-`://` and ports. A secret of `public` or an empty secret marks a **public**
-client (no secret, PKCE required).
+A client sets **exactly one** of `secret = "..."` or `public = true`.
+`public = true` is Keycloak's "Client authentication: Off": the client has no
+secret and must use PKCE. An empty secret is an error (it used to silently mean
+"public" — that footgun is why the format changed).
 
 A redirect URI ending in `/*` matches any path below it. The wildcard must sit on
 a path boundary: `http://localhost:5173*` is rejected, because its prefix ends
 mid-authority and would also match `http://localhost:51739.evil.com`. A URI of
 exactly `*` allows anything, which is occasionally handy and never safe.
 
+### The TOML subset
+
+This is a real, small subset of TOML: `#` comments, quoted strings, `true` /
+`false`, and string arrays. Inline tables, `[[array-of-tables]]`, floats and
+multi-line strings are rejected with a line number.
+
+### Inline flags (`--user` / `--client`)
+
+For a terse one-liner — handy in a Docker or CI invocation — add a single user or
+client with `--user` / `--client` (both repeatable), which keep a compact
+colon-separated syntax:
+
 ```
-# clients.txt
-myapp = s3cret : http://localhost:3000/*
-spa   = public : http://localhost:5173/*,http://localhost:5174/callback
-api   = topsecret : http://localhost:8080/login/oauth2/code/minicloak
+--user   username=password:email:name:role1,role2
+--client client_id=secret:redirect_uri[,redirect_uri...]
+```
+
+Everything after `password` (or after `secret`) is optional. `--user`'s third
+column is a display name, split on its first space into `given_name` /
+`family_name`. For example:
+
+```bash
+minicloak \
+  --user "carol=carolpass:carol@example.com:Carol Quinn:admin,staff" \
+  --client "cli=topsecret:http://localhost:8080/*"
 ```
 
 ## Endpoints
@@ -317,7 +347,7 @@ and OpenSSL accepts minicloak's signatures via `openssl dgst -sha256 -verify`.
 tool and it makes development-convenient trade-offs that are wrong for
 production:
 
-- **Passwords are plaintext** in the users file (and on the command line).
+- **Passwords are plaintext** in the config file (and on the command line).
 - **Quick-login** buttons on the login page sign a user in with **no password**
   at all — dev convenience only. Disable with `--no-quick-login`; the same
   applies to `--auto-login`, which skips authentication entirely.
@@ -332,7 +362,7 @@ Bind it to `localhost` (the default) and keep it there.
 minicloak leaves out, on purpose:
 
 - User federation, LDAP / Active Directory, social login
-- An admin console or admin REST API (users and clients come from files/flags)
+- An admin console or admin REST API (users and clients come from a config file or flags)
 - Consent screens and scope-grant management
 - Back-channel or front-channel logout propagation
 - Token exchange, device flow, CIBA

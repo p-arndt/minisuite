@@ -1,0 +1,58 @@
+# minicloak config file  (pass with  --config minicloak.toml)
+#
+# One TOML file describes every user and client.  The field names deliberately
+# mirror the Keycloak admin console, since that is what most users are migrating
+# from.  A '#' starts a comment; blank lines are ignored.
+#
+# This is a real (but small) TOML subset: '#' comments, quoted strings,
+# true/false, and string arrays.  Inline tables, [[array-of-tables]], floats and
+# multi-line strings are rejected with a line number.
+
+# ---------------------------------------------------------------------------
+# Clients
+# ---------------------------------------------------------------------------
+# A client sets EXACTLY ONE of `secret = "..."` or `public = true`.
+# `public = true` is Keycloak's "Client authentication: Off"; a public client
+# has no secret and must use PKCE.  An empty secret is an error.
+#
+# A redirect URI ending in '/*' matches any path below it.  The wildcard must
+# sit on a path boundary: 'http://localhost:5173*' is rejected, since it would
+# also match 'http://localhost:51739.evil.com'.  A URI of exactly '*' allows
+# anything.
+
+# confidential client: authenticates with the secret `s3cret`
+[clients.myapp]
+secret        = "s3cret"
+redirect_uris = ["http://localhost:3000/*"]
+
+# public client: PKCE required, two allowed redirect URIs
+[clients.spa]
+public        = true
+redirect_uris = ["http://localhost:5173/*", "http://localhost:5174/callback"]
+
+# ---------------------------------------------------------------------------
+# Users
+# ---------------------------------------------------------------------------
+# `password` is required.  `email`, `first_name`, `last_name` and `roles` are
+# all optional.  `first_name`/`last_name` map to the `given_name`/`family_name`
+# claims, and the `name` claim is derived as "First Last".
+
+# full record: password, email, name and two roles
+[users.alice]
+password   = "alice"
+email      = "alice@example.com"
+first_name = "Alice"
+last_name  = "Admin"
+roles      = ["admin", "staff"]
+
+# a username containing a dot or an '@' needs a quoted key
+[users."ada@example.com"]
+password   = "adapass"
+email      = "ada@example.com"
+first_name = "Ada"
+last_name  = "Lovelace"
+roles      = ["staff"]
+
+# minimal user: password only (no email, name or roles)
+[users.carol]
+password = "carolpass"

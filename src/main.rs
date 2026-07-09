@@ -3,6 +3,7 @@
 mod base64;
 mod bigint;
 mod clients;
+mod config;
 mod http;
 mod json;
 mod jwt;
@@ -11,6 +12,7 @@ mod rand;
 mod rsa;
 mod sha256;
 mod store;
+mod toml;
 mod url;
 mod users;
 mod util;
@@ -52,10 +54,9 @@ Usage: minicloak [options]
   --bind ADDR              default 127.0.0.1:9500
   --realm NAME             default dev
   --issuer URL             override the issuer (default: http://<Host header>/realms/<realm>)
-  --users FILE             load users: username=password:email:name:role1,role2
-  --clients FILE           load clients: client_id=secret:redirect_uri[,uri...]
-  --user SPEC              add one user inline (repeatable)
-  --client SPEC            add one client inline (repeatable)
+  --config FILE            load users and clients from a TOML file
+  --user SPEC              add one user inline: username=password:email:name:role1,role2
+  --client SPEC            add one client inline: client_id=secret:redirect_uri[,uri...]
   --key FILE               RSA private key PEM; generated and written if absent
   --key-bits N             key size when generating, default 2048
   --access-ttl SECS        access token lifetime, default 300
@@ -68,7 +69,9 @@ Usage: minicloak [options]
   -h, --help               show this help
   -V, --version            print the version and exit
 
-A client secret of `public` (or an empty one) marks a public client, which must use PKCE.
+In the config file a client sets exactly one of `secret = \"...\"` or `public = true`.
+An inline --client spec marks a public client with the secret `public`, or an empty one.
+A public client must use PKCE.
 A redirect URI may end in `/*` to allow any path below it, or be exactly `*` to allow any URI.";
 
 fn fail(msg: &str) -> ! {
@@ -115,19 +118,14 @@ fn parse_args() -> Config {
                         .to_string(),
                 )
             }
-            "--users" => {
-                let p = next("--users", &mut args);
-                let u = Users::load_file(Path::new(&p))
-                    .unwrap_or_else(|e| fail(&format!("failed to load users from {}: {}", p, e)));
-                for user in u.list() {
+            "--config" => {
+                let p = next("--config", &mut args);
+                let (users, clients) = config::load_file(Path::new(&p))
+                    .unwrap_or_else(|e| fail(&format!("failed to load {}: {}", p, e)));
+                for user in users.list() {
                     cfg.users.add(user.clone());
                 }
-            }
-            "--clients" => {
-                let p = next("--clients", &mut args);
-                let c = Clients::load_file(Path::new(&p))
-                    .unwrap_or_else(|e| fail(&format!("failed to load clients from {}: {}", p, e)));
-                for client in c.list() {
+                for client in clients.list() {
                     cfg.clients.add(client.clone());
                 }
             }
@@ -182,14 +180,16 @@ fn parse_args() -> Config {
             username: "alice".into(),
             password: "alice".into(),
             email: "alice@example.com".into(),
-            name: "Alice Admin".into(),
+            first_name: "Alice".into(),
+            last_name: "Admin".into(),
             roles: vec!["admin".into(), "staff".into()],
         });
         cfg.users.add(User {
             username: "bob".into(),
             password: "bob".into(),
             email: "bob@example.com".into(),
-            name: "Bob Dev".into(),
+            first_name: "Bob".into(),
+            last_name: "Dev".into(),
             roles: vec!["staff".into()],
         });
     }

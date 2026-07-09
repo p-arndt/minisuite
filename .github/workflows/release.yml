@@ -164,7 +164,7 @@ jobs:
           NAME="minicloak-${V}-${TARGET}"
           mkdir -p "dist/$NAME"
           cp "target/${TARGET}/release/minicloak" "dist/$NAME/"
-          cp README.md LICENSE users.example clients.example "dist/$NAME/" 2>/dev/null || true
+          cp README.md LICENSE minicloak.example.toml "dist/$NAME/" 2>/dev/null || true
           tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
           ls -l dist
 
@@ -178,7 +178,7 @@ jobs:
           $NAME = "minicloak-$env:V-$env:TARGET"
           New-Item -ItemType Directory -Force -Path "dist/$NAME" | Out-Null
           Copy-Item "target/$env:TARGET/release/minicloak.exe" "dist/$NAME/"
-          Copy-Item README.md, LICENSE, users.example, clients.example "dist/$NAME/" -ErrorAction SilentlyContinue
+          Copy-Item README.md, LICENSE, minicloak.example.toml "dist/$NAME/" -ErrorAction SilentlyContinue
           Compress-Archive -Path "dist/$NAME/*" -DestinationPath "dist/$NAME.zip" -Force
           Get-ChildItem dist
 

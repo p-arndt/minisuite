@@ -1,9 +1,9 @@
-// Client registry: flat file of `client_id=secret:redirect_uri[,redirect_uri...]`.
+// Client registry. Clients are declared in the TOML config file (see config.rs);
+// the one-liner `client_id=secret:redirect_uri[,redirect_uri...]` parsed here
+// backs the repeatable `--client` flag, where a terse spec beats a file.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
-use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Client {
@@ -65,11 +65,6 @@ impl Clients {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
-    }
-
-    pub fn load_file(path: &Path) -> io::Result<Clients> {
-        let text = fs::read_to_string(path)?;
-        Self::parse(&text)
     }
 
     pub fn parse(text: &str) -> io::Result<Clients> {
@@ -137,7 +132,7 @@ impl Clients {
 /// `http://localhost:5173*` would otherwise also match `http://localhost:51739.evil.com`,
 /// because the prefix ends mid-authority. Requiring `/` before the `*` pins the
 /// wildcard to a path boundary, so it can never widen the host.
-fn validate_redirect_uri(uri: &str) -> Result<(), String> {
+pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), String> {
     if uri == "*" {
         return Ok(()); // explicit "anything goes" escape hatch
     }
@@ -171,17 +166,6 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    fn tmp_path(name: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        p.push(format!("minicloak_clients_{}_{}", nanos, name));
-        p
-    }
 
     #[test]
     fn parse_secret_and_uris_with_colons() {
@@ -273,18 +257,6 @@ mod tests {
         let err = Clients::parse("app=s:http://x/cb\nno_equals\n").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("line 2"));
-    }
-
-    #[test]
-    fn load_file_roundtrip() {
-        let p = tmp_path("ok");
-        let mut f = fs::File::create(&p).unwrap();
-        writeln!(f, "# clients").unwrap();
-        writeln!(f, "app=s3cret:http://localhost:3000/callback").unwrap();
-        drop(f);
-        let c = Clients::load_file(&p).unwrap();
-        assert!(c.get("app").unwrap().check_secret("s3cret"));
-        let _ = fs::remove_file(&p);
     }
 
     #[test]

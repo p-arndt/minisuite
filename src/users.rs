@@ -1,16 +1,17 @@
-// User store: flat file of `username=password:email:name:role1,role2`.
+// User store. Users are declared in the TOML config file (see config.rs); the
+// one-liner `username=password:email:name:role1,role2` parsed here backs the
+// repeatable `--user` flag, where a terse spec beats a file.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
-use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct User {
     pub username: String,
     pub password: String,
     pub email: String,      // "" if unset
-    pub name: String,       // "" if unset
+    pub first_name: String, // "" if unset
+    pub last_name: String,  // "" if unset
     pub roles: Vec<String>, // empty if unset
 }
 
@@ -21,12 +22,11 @@ impl User {
         crate::sha256::hex(&digest[..16])
     }
 
-    /// Splits `name` on the first space: ("Alice", "Admin"). Empty strings if `name` is "".
-    pub fn given_family(&self) -> (String, String) {
-        match self.name.split_once(' ') {
-            Some((given, family)) => (given.to_string(), family.to_string()),
-            None => (self.name.clone(), String::new()),
-        }
+    /// Display name "First Last". "" when both are empty; "Cher" when last_name is "".
+    pub fn name(&self) -> String {
+        format!("{} {}", self.first_name, self.last_name)
+            .trim()
+            .to_string()
     }
 }
 
@@ -67,11 +67,6 @@ impl Users {
         self.map.is_empty()
     }
 
-    pub fn load_file(path: &Path) -> io::Result<Users> {
-        let text = fs::read_to_string(path)?;
-        Self::parse(&text)
-    }
-
     pub fn parse(text: &str) -> io::Result<Users> {
         let mut users = Users::new();
         for (i, raw) in text.lines().enumerate() {
@@ -99,7 +94,13 @@ impl Users {
             let mut fields = rest.splitn(4, ':');
             let password = fields.next().unwrap_or("").trim().to_string();
             let email = fields.next().unwrap_or("").trim().to_string();
-            let name = fields.next().unwrap_or("").trim().to_string();
+            // The one-liner keeps a single display-name column; split it on the first
+            // space so "Alice Admin" -> ("Alice", "Admin") and "Cher" -> ("Cher", "").
+            let name = fields.next().unwrap_or("").trim();
+            let (first_name, last_name) = match name.split_once(' ') {
+                Some((first, last)) => (first.to_string(), last.to_string()),
+                None => (name.to_string(), String::new()),
+            };
             let roles = match fields.next() {
                 Some(r) if !r.is_empty() => r
                     .split(',')
@@ -112,7 +113,8 @@ impl Users {
                 username: username.to_string(),
                 password,
                 email,
-                name,
+                first_name,
+                last_name,
                 roles,
             });
         }
@@ -140,17 +142,6 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    fn tmp_path(name: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        p.push(format!("minicloak_users_{}_{}", nanos, name));
-        p
-    }
 
     #[test]
     fn aligned_columns_parse_the_same_as_tight_ones() {
@@ -160,7 +151,8 @@ mod tests {
             Users::parse("alice = alice : alice@example.com : Alice Admin : admin,staff").unwrap();
         assert_eq!(tight.get("alice"), spaced.get("alice"));
         assert_eq!(spaced.get("alice").unwrap().password, "alice");
-        assert_eq!(spaced.get("alice").unwrap().name, "Alice Admin");
+        assert_eq!(spaced.get("alice").unwrap().first_name, "Alice");
+        assert_eq!(spaced.get("alice").unwrap().last_name, "Admin");
     }
 
     #[test]
@@ -186,7 +178,8 @@ dave=d:dave@x.de:Dave Grohl:admin,user
         let alice = u.get("alice").unwrap();
         assert_eq!(alice.password, "alice");
         assert_eq!(alice.email, "");
-        assert_eq!(alice.name, "");
+        assert_eq!(alice.first_name, "");
+        assert_eq!(alice.last_name, "");
         assert!(alice.roles.is_empty());
 
         let bob = u.get("bob").unwrap();
@@ -196,32 +189,52 @@ dave=d:dave@x.de:Dave Grohl:admin,user
         let carol = u.get("carol").unwrap();
         assert_eq!(carol.password, "c");
         assert_eq!(carol.email, "");
-        assert_eq!(carol.name, "Carol Q");
+        assert_eq!(carol.first_name, "Carol");
+        assert_eq!(carol.last_name, "Q");
         assert_eq!(carol.roles, vec!["admin".to_string()]);
 
         let dave = u.get("dave").unwrap();
         assert_eq!(dave.roles, vec!["admin".to_string(), "user".to_string()]);
-        assert_eq!(
-            dave.given_family(),
-            ("Dave".to_string(), "Grohl".to_string())
-        );
+        assert_eq!(dave.first_name, "Dave");
+        assert_eq!(dave.last_name, "Grohl");
     }
 
     #[test]
-    fn given_family_edge_cases() {
-        let u = User {
+    fn one_liner_splits_name_column_on_first_space() {
+        // Third column is a full display name; split on the first space only.
+        let u = Users::parse("dave=d:dave@x.de:Dave Van Halen:user").unwrap();
+        let dave = u.get("dave").unwrap();
+        assert_eq!(dave.first_name, "Dave");
+        assert_eq!(dave.last_name, "Van Halen");
+
+        let cher = Users::parse("cher=c::Cher").unwrap();
+        let cher = cher.get("cher").unwrap();
+        assert_eq!(cher.first_name, "Cher");
+        assert_eq!(cher.last_name, "");
+    }
+
+    #[test]
+    fn name_joins_first_and_last() {
+        let base = User {
             username: "x".into(),
             password: "x".into(),
             email: "".into(),
-            name: "".into(),
+            first_name: "".into(),
+            last_name: "".into(),
             roles: vec![],
         };
-        assert_eq!(u.given_family(), (String::new(), String::new()));
-        let u2 = User {
-            name: "Cher".into(),
-            ..u.clone()
+        assert_eq!(base.name(), "");
+        let first_only = User {
+            first_name: "Cher".into(),
+            ..base.clone()
         };
-        assert_eq!(u2.given_family(), ("Cher".to_string(), String::new()));
+        assert_eq!(first_only.name(), "Cher");
+        let both = User {
+            first_name: "Alice".into(),
+            last_name: "Admin".into(),
+            ..base.clone()
+        };
+        assert_eq!(both.name(), "Alice Admin");
     }
 
     #[test]
@@ -239,7 +252,8 @@ dave=d:dave@x.de:Dave Grohl:admin,user
             username: "alice".into(),
             password: "x".into(),
             email: "".into(),
-            name: "".into(),
+            first_name: "".into(),
+            last_name: "".into(),
             roles: vec![],
         };
         let s = u.sub();
@@ -255,21 +269,24 @@ dave=d:dave@x.de:Dave Grohl:admin,user
             username: "a".into(),
             password: "1".into(),
             email: "".into(),
-            name: "".into(),
+            first_name: "".into(),
+            last_name: "".into(),
             roles: vec![],
         });
         u.add(User {
             username: "b".into(),
             password: "1".into(),
             email: "".into(),
-            name: "".into(),
+            first_name: "".into(),
+            last_name: "".into(),
             roles: vec![],
         });
         u.add(User {
             username: "a".into(),
             password: "2".into(),
             email: "".into(),
-            name: "".into(),
+            first_name: "".into(),
+            last_name: "".into(),
             roles: vec![],
         });
         let names: Vec<&str> = u.list().iter().map(|x| x.username.as_str()).collect();
@@ -284,21 +301,5 @@ dave=d:dave@x.de:Dave Grohl:admin,user
         assert!(err.to_string().contains("line 2"));
         let err2 = Users::parse("=nopass\n").unwrap_err();
         assert!(err2.to_string().contains("line 1"));
-    }
-
-    #[test]
-    fn load_file_roundtrip() {
-        let p = tmp_path("ok");
-        let mut f = fs::File::create(&p).unwrap();
-        writeln!(f, "alice=alice:a@x.de:Alice A:admin").unwrap();
-        drop(f);
-        let u = Users::load_file(&p).unwrap();
-        assert_eq!(u.get("alice").unwrap().email, "a@x.de");
-        let _ = fs::remove_file(&p);
-    }
-
-    #[test]
-    fn load_file_missing_is_err() {
-        assert!(Users::load_file(&tmp_path("missing")).is_err());
     }
 }

@@ -765,11 +765,18 @@ fn add_profile_claims(claims: &mut Vec<(&'static str, J)>, u: &User, scope: &str
         claims.push(("email", J::S(u.email.clone())));
         claims.push(("email_verified", J::B(true)));
     }
-    if has_scope(scope, "profile") && !u.name.is_empty() {
-        let (given, family) = u.given_family();
-        claims.push(("name", J::S(u.name.clone())));
-        claims.push(("given_name", J::S(given)));
-        claims.push(("family_name", J::S(family)));
+    if has_scope(scope, "profile") {
+        // Keycloak omits empty profile claims, so only emit each when it has a value.
+        let name = u.name();
+        if !name.is_empty() {
+            claims.push(("name", J::S(name)));
+        }
+        if !u.first_name.is_empty() {
+            claims.push(("given_name", J::S(u.first_name.clone())));
+        }
+        if !u.last_name.is_empty() {
+            claims.push(("family_name", J::S(u.last_name.clone())));
+        }
     }
     if !u.roles.is_empty() {
         let roles: Vec<J> = u.roles.iter().map(|r| J::S(r.clone())).collect();
@@ -1142,7 +1149,8 @@ mod tests {
             username: "alice".into(),
             password: "pw".into(),
             email: "alice@example.com".into(),
-            name: "Alice Admin".into(),
+            first_name: "Alice".into(),
+            last_name: "Admin".into(),
             roles: vec!["admin".into()],
         });
         let mut clients = Clients::new();
@@ -1334,7 +1342,8 @@ mod tests {
             username: "alice".into(),
             password: "pw".into(),
             email: "a@x.de".into(),
-            name: "Alice Admin".into(),
+            first_name: "Alice".into(),
+            last_name: "Admin".into(),
             roles: vec!["admin".into()],
         };
         let keys = |scope: &str| {
@@ -1347,5 +1356,20 @@ mod tests {
         assert!(keys("openid email").contains(&"email"));
         assert!(keys("openid profile").contains(&"given_name"));
         assert!(!keys("openid email").contains(&"name"));
+
+        // Keycloak parity: a user with no last name emits given_name but not family_name.
+        let mononym = User {
+            first_name: "Cher".into(),
+            last_name: "".into(),
+            ..u.clone()
+        };
+        let mono_keys = {
+            let mut c = Vec::new();
+            add_profile_claims(&mut c, &mononym, "openid profile");
+            c.into_iter().map(|(k, _)| k).collect::<Vec<_>>()
+        };
+        assert!(mono_keys.contains(&"name"));
+        assert!(mono_keys.contains(&"given_name"));
+        assert!(!mono_keys.contains(&"family_name"));
     }
 }
