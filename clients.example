@@ -1,0 +1,26 @@
+# minicloak clients file  (pass with  --clients clients.txt)
+#
+# One client per line.  A '#' starts a comment only at the beginning of a line.
+# Blank lines are ignored.
+#
+#   client_id = secret : redirect_uri[,redirect_uri...]
+#
+# The value is split on its FIRST ':' only, so redirect URIs keep their own
+# '://' and ports.  A secret of `public` or an empty secret marks a PUBLIC
+# client, which has no secret and must use PKCE.
+#
+# A redirect URI ending in '/*' matches any path below it.  The wildcard must sit
+# on a path boundary: 'http://localhost:5173*' is rejected, since it would also
+# match 'http://localhost:51739.evil.com'.  A URI of exactly '*' allows anything.
+
+# confidential client: authenticates with the secret `s3cret`
+myapp = s3cret : http://localhost:3000/*
+
+# public client (secret `public`): PKCE required, two allowed redirect URIs
+spa = public : http://localhost:5173/*,http://localhost:5174/callback
+
+# public client via an empty secret (same effect as `public`)
+cli = : http://localhost:8080/*
+
+# confidential client with an exact (non-wildcard) redirect URI
+api = topsecret : http://localhost:8080/login/oauth2/code/minicloak
