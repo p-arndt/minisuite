@@ -10,13 +10,17 @@
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 
 # Set by BuildKit/buildx to the platform being built (e.g. amd64, arm64).
-# Defaults to amd64 for plain `docker build` invocations.
-ARG TARGETARCH=amd64
+# Must NOT carry a default: for predefined platform args, a Dockerfile default
+# takes precedence over the value BuildKit injects, which would silently pin
+# every platform to that default and produce an amd64 binary inside the arm64
+# image.
+ARG TARGETARCH
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        musl-tools \
        gcc-aarch64-linux-gnu \
+       binutils \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 
@@ -28,14 +32,24 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-# Map the Docker arch to the matching Rust musl target.
-RUN case "$TARGETARCH" in \
-        amd64) RUST_TARGET=x86_64-unknown-linux-musl ;; \
-        arm64) RUST_TARGET=aarch64-unknown-linux-musl ;; \
-        *)     echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
-    esac \
-    && cargo build --release --target "$RUST_TARGET" \
-    && cp "target/$RUST_TARGET/release/minicloak" /minicloak
+# Map the Docker arch to the matching Rust musl target, then assert the binary
+# we produced really is that architecture. Without the check, a build that
+# resolves TARGETARCH wrongly ships an amd64 binary in the arm64 image and only
+# fails at `docker run` time on an ARM host with "exec format error".
+RUN set -eu; \
+    case "$TARGETARCH" in \
+        amd64) RUST_TARGET=x86_64-unknown-linux-musl; WANT_MACHINE="X86-64" ;; \
+        arm64) RUST_TARGET=aarch64-unknown-linux-musl; WANT_MACHINE="AArch64" ;; \
+        *)     echo "unsupported TARGETARCH: ${TARGETARCH:-<unset>}" >&2; exit 1 ;; \
+    esac; \
+    cargo build --release --target "$RUST_TARGET"; \
+    cp "target/$RUST_TARGET/release/minicloak" /minicloak; \
+    machine="$(readelf -h /minicloak | sed -n 's/^ *Machine: *//p')"; \
+    echo "TARGETARCH=$TARGETARCH target=$RUST_TARGET machine=$machine"; \
+    case "$machine" in \
+        *"$WANT_MACHINE"*) ;; \
+        *) echo "ERROR: built $machine binary for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac
 
 # Pre-create the data directory so it lands in the runtime image owned by the
 # nonroot user (scratch has no shell to mkdir at runtime). minicloak writes its
