@@ -8,7 +8,8 @@
 # against it. Recipes are POSIX shell so `smoke` works from Git Bash on Windows
 # as well as Linux/macOS.
 set shell := ["bash", "-cu"]
-set windows-shell := ["bash", "-cu"]
+# set windows-shell := ["bash", "-cu"]
+set windows-shell := ["pwsh.exe", "-Command"]
 
 alias lint := clippy
 
