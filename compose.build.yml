@@ -1,0 +1,32 @@
+# Build override: compile the images from this checkout instead of pulling the
+# published ones. The root Dockerfile is multi-target, so every service points
+# at the same context and picks its own `target:`.
+#
+#   docker compose -f compose.yml -f compose.build.yml up --build
+#
+# `image:` is kept so the locally built images are tagged the same way the
+# published ones are — `docker compose -f compose.yml up` afterwards reuses them.
+
+services:
+  minicloak:
+    build:
+      context: .
+      target: minicloak
+
+  minimail:
+    build:
+      context: .
+      target: minimail
+
+  minibucket:
+    build:
+      context: .
+      target: minibucket
+
+  # Matches the commented-out all-in-one service in compose.yml. Harmless while
+  # that service is commented out — compose only applies overrides to services
+  # that actually exist.
+  # minisuite:
+  #   build:
+  #     context: .
+  #     target: minisuite

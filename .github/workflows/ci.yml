@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Format, lint and unit-test the whole workspace on all three OSes. Every
+  # crate builds from std alone, so there is nothing to install beyond rustup.
+  # ---------------------------------------------------------------------------
+  test:
+    name: fmt + clippy + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      # Cargo.lock carries the workspace version once per member, and is
+      # refreshed by `just release`. --locked fails if it drifted from
+      # Cargo.toml, which would otherwise only surface at release time.
+      - name: Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+        shell: bash
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  # ---------------------------------------------------------------------------
+  # Drive the real network surface of all three servers from Python. The runner
+  # builds each release binary, starts it, waits for its port, runs the crate's
+  # smoketest.py and shuts the server down again.
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: end-to-end (smoketest.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # minibucket's suite talks S3 through the real AWS SDK, so a bug in
+      # minibucket's signature handling cannot make it pass.
+      - name: Install Python deps
+        run: pip install boto3
+
+      - name: Run the end-to-end suite
+        run: node scripts/smoke.mjs all
+
+  # ---------------------------------------------------------------------------
+  # minicloak's RSA implementation is hand-written. Check it against an
+  # independent one: openssl must accept both the generated key and the
+  # signatures on the tokens minicloak mints.
+  # ---------------------------------------------------------------------------
+  interop:
+    name: openssl accepts minicloak's keys and signatures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate a key, sign, verify with openssl
+        run: |
+          cargo build --release -p minicloak
+          mkdir -p target/interop
+          ./target/release/minicloak --bind 127.0.0.1:19600 --key target/interop/key.pem &
+          server=$!
+          trap "kill $server 2>/dev/null || true" EXIT
+          sleep 2
+
+          echo "--- openssl rsa -check (p*q == n, d, CRT parameters) ---"
+          openssl rsa -in target/interop/key.pem -check -noout
+
+          echo "--- openssl verifies a token minted by minicloak ---"
+          openssl rsa -in target/interop/key.pem -pubout -out target/interop/pub.pem 2>/dev/null
+          TOKEN=$(curl -s -X POST http://127.0.0.1:19600/token \
+            -d grant_type=client_credentials -d client_id=myapp -d client_secret=s3cret \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+          python3 - "$TOKEN" <<'PY'
+          import base64, sys
+          token = sys.argv[1]
+          signing_input, sig_b64 = token.rsplit(".", 1)
+          open("target/interop/jwt_input.bin", "wb").write(signing_input.encode())
+          open("target/interop/jwt_sig.bin", "wb").write(base64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4)))
+          PY
+          openssl dgst -sha256 -verify target/interop/pub.pem \
+            -signature target/interop/jwt_sig.bin target/interop/jwt_input.bin
+
+  # ---------------------------------------------------------------------------
+  # Prove the multi-target Dockerfile still builds and that the binary inside
+  # the scratch image actually runs. amd64 only — the arm64 leg is exercised by
+  # the release workflow, and emulating it here would triple CI time.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: docker build (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The default target of the Dockerfile: all four binaries, suite image.
+      - name: Build the minisuite image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: minisuite
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: minisuite:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Sanity check that the static musl binary in the scratch image executes.
+      # --help must exit 0 and print usage.
+      - name: Run --help
+        run: docker run --rm minisuite:ci --help

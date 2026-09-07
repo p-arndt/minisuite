@@ -1,0 +1,24 @@
+# stamp — https://github.com/p-arndt/stamp
+#
+# There is exactly ONE version number for the whole suite: root Cargo.toml's
+# [workspace.package] version, which every crate inherits via
+# `version.workspace = true`, and which every image is tagged with.
+#
+# Cargo.lock also carries that number, once per workspace member, but those live
+# in `[[package]]` array-of-tables entries that stamp deliberately will not
+# rewrite (a key path inside a repeating table is ambiguous). scripts/release.mjs
+# closes that gap by running `cargo update --workspace` between `stamp set` and
+# `stamp release` — use `just release`, not `stamp release`, to cut a release.
+
+project: minisuite
+
+version:
+  - Cargo.toml#workspace.package.version
+
+release:
+  branch: main
+  remote: origin
+  tag: "v{{ version }}"
+  commit: "release: {{ tag }}"
+  push: true
+  prerelease: beta

@@ -1,0 +1,31 @@
+# Keep the build context to what the workspace build actually needs:
+# Cargo.toml, Cargo.lock and crates/*/{Cargo.toml,src}.
+target/
+data/
+mail/
+.git/
+.github/
+*.md
+smoketest.py
+*.pem
+__pycache__/
+
+# Per-crate leftovers and infra that never affect the build.
+**/target/
+**/data/
+**/.git/
+**/.github/
+**/__pycache__/
+**/smoketest.py
+**/version_test.py
+**/*.pem
+Dockerfile
+.dockerignore
+compose.yml
+compose.build.yml
+justfile
+scripts/
+**/justfile
+**/Dockerfile
+**/.dockerignore
+**/scripts/

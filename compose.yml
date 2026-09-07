@@ -1,0 +1,105 @@
+# minisuite — local dev backend stack.
+#
+#   docker compose up -d                 # pull + run the three published images
+#   docker compose down                  # stop (volumes survive)
+#   docker compose down -v               # stop and wipe the data volumes
+#
+# Build the images from this checkout instead of pulling them:
+#   docker compose -f compose.yml -f compose.build.yml up --build
+#
+# Every service is configured through environment variables (the flags in the
+# image CMD are just defaults); the MINICLOAK_* / MINIMAIL_* / MINIBUCKET_*
+# names below are the same ones the `minisuite` all-in-one binary honours.
+#
+# The credentials here are DEV DEFAULTS and are deliberately trivial. Do not
+# expose these containers to a network you do not trust.
+
+services:
+  # --- OpenID Connect provider ------------------------------------------
+  minicloak:
+    image: ghcr.io/p-arndt/minicloak:latest
+    container_name: minicloak
+    restart: unless-stopped
+    ports:
+      - "9500:9500"
+    environment:
+      # Bind inside the container; the host mapping is the `ports:` entry above.
+      MINICLOAK_BIND: "0.0.0.0:9500"
+      # RSA signing key: kept in the volume so issued tokens stay verifiable
+      # across restarts. Generated on first boot if the file does not exist.
+      MINICLOAK_KEY: "/data/key.pem"
+      # Optional: mount a minicloak.toml (users, clients, scopes) and point here.
+      # MINICLOAK_CONFIG: "/data/minicloak.toml"
+    volumes:
+      - minicloak-data:/data
+
+  # --- SMTP sink + web UI ------------------------------------------------
+  minimail:
+    image: ghcr.io/p-arndt/minimail:latest
+    container_name: minimail
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP — point your app's mailer here
+      - "8025:8025"   # Web UI + JSON API — http://localhost:8025
+    environment:
+      MINIMAIL_SMTP_BIND: "0.0.0.0:1025"
+      MINIMAIL_HTTP_BIND: "0.0.0.0:8025"
+      MINIMAIL_ROOT: "/data"
+      # SMTP AUTH + web UI credentials. Drop these and set MINIMAIL_ANONYMOUS=1
+      # if you want an entirely open sink.
+      MINIMAIL_USER: "minimail"
+      MINIMAIL_PASSWORD: "minimail"
+      # MINIMAIL_ANONYMOUS: "1"
+    volumes:
+      - minimail-data:/data
+
+  # --- S3-compatible object storage --------------------------------------
+  minibucket:
+    image: ghcr.io/p-arndt/minibucket:latest
+    container_name: minibucket
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      MINIBUCKET_BIND: "0.0.0.0:9000"
+      MINIBUCKET_ROOT: "/data"
+      # The single built-in key pair. For more than one, mount a creds file and
+      # set MINIBUCKET_CREDENTIALS instead.
+      MINIBUCKET_ACCESS_KEY: "alice"
+      MINIBUCKET_SECRET_KEY: "alicepass"
+      MINIBUCKET_REGION: "us-east-1"
+      # MINIBUCKET_CREDENTIALS: "/data/creds"
+      # MINIBUCKET_ANONYMOUS: "1"
+    volumes:
+      - minibucket-data:/data
+
+  # --- Alternative: everything in ONE container --------------------------
+  # Uncomment this service (and comment out the three above) to run the whole
+  # suite as a single process sharing a single volume. State is split into
+  # /data/minicloak, /data/minimail and /data/minibucket automatically, and a
+  # landing page linking all three is served on :9900.
+  #
+  # minisuite:
+  #   image: ghcr.io/p-arndt/minisuite:latest
+  #   container_name: minisuite
+  #   restart: unless-stopped
+  #   ports:
+  #     - "9500:9500"   # minicloak
+  #     - "9000:9000"   # minibucket
+  #     - "1025:1025"   # minimail SMTP
+  #     - "8025:8025"   # minimail web UI
+  #     - "9900:9900"   # landing page — http://localhost:9900
+  #   environment:
+  #     # The per-service env vars all apply inside the suite as well.
+  #     MINIMAIL_USER: "minimail"
+  #     MINIMAIL_PASSWORD: "minimail"
+  #     MINIBUCKET_ACCESS_KEY: "alice"
+  #     MINIBUCKET_SECRET_KEY: "alicepass"
+  #   volumes:
+  #     - minisuite-data:/data
+
+volumes:
+  minicloak-data:
+  minimail-data:
+  minibucket-data:
+  # minisuite-data:
