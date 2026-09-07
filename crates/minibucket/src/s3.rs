@@ -40,7 +40,14 @@ pub fn dispatch<R: std::io::BufRead>(
             "GET" if key.is_empty() => {
                 crate::multipart::list_multipart_uploads(srv, sock, &bucket, &rid)
             }
-            _ => error_response(sock, 400, "InvalidRequest", "uploads route", &rid, &req.path),
+            _ => error_response(
+                sock,
+                400,
+                "InvalidRequest",
+                "uploads route",
+                &rid,
+                &req.path,
+            ),
         };
     }
     if let Some(upload_id) = qget(&query, "uploadId") {
@@ -48,25 +55,54 @@ pub fn dispatch<R: std::io::BufRead>(
         let part_number = qget(&query, "partNumber").and_then(|s| s.parse::<u32>().ok());
         return match method.as_str() {
             "PUT" if part_number.is_some() => crate::multipart::upload_part(
-                srv, &mut req, sock, &bucket, &key, &upload_id, part_number.unwrap(),
-                &rid, chunk_ctx,
+                srv,
+                &mut req,
+                sock,
+                &bucket,
+                &key,
+                &upload_id,
+                part_number.unwrap(),
+                &rid,
+                chunk_ctx,
             ),
             "POST" => crate::multipart::complete_multipart(
                 srv, &mut req, sock, &bucket, &key, &upload_id, &rid,
             ),
-            "DELETE" => crate::multipart::abort_multipart(srv, sock, &bucket, &key, &upload_id, &rid),
+            "DELETE" => {
+                crate::multipart::abort_multipart(srv, sock, &bucket, &key, &upload_id, &rid)
+            }
             "GET" => crate::multipart::list_parts(srv, sock, &bucket, &key, &upload_id, &rid),
-            _ => error_response(sock, 400, "InvalidRequest", "uploadId route", &rid, &req.path),
+            _ => error_response(
+                sock,
+                400,
+                "InvalidRequest",
+                "uploadId route",
+                &rid,
+                &req.path,
+            ),
         };
     }
 
     // Tagging routes.
     if has_q(&query, "tagging") {
         return match method.as_str() {
-            "GET" if !key.is_empty() => crate::tagging::get_object_tagging(srv, sock, &bucket, &key, &rid),
-            "PUT" if !key.is_empty() => crate::tagging::put_object_tagging(srv, &mut req, sock, &bucket, &key, &rid),
-            "DELETE" if !key.is_empty() => crate::tagging::delete_object_tagging(srv, sock, &bucket, &key, &rid),
-            _ => error_response(sock, 501, "NotImplemented", "bucket tagging not implemented", &rid, &req.path),
+            "GET" if !key.is_empty() => {
+                crate::tagging::get_object_tagging(srv, sock, &bucket, &key, &rid)
+            }
+            "PUT" if !key.is_empty() => {
+                crate::tagging::put_object_tagging(srv, &mut req, sock, &bucket, &key, &rid)
+            }
+            "DELETE" if !key.is_empty() => {
+                crate::tagging::delete_object_tagging(srv, sock, &bucket, &key, &rid)
+            }
+            _ => error_response(
+                sock,
+                501,
+                "NotImplemented",
+                "bucket tagging not implemented",
+                &rid,
+                &req.path,
+            ),
         };
     }
 
@@ -75,7 +111,14 @@ pub fn dispatch<R: std::io::BufRead>(
         return match method.as_str() {
             "GET" => crate::versioning::get_versioning(srv, sock, &bucket, &rid),
             "PUT" => crate::versioning::put_versioning(srv, &mut req, sock, &bucket, &rid),
-            _ => error_response(sock, 405, "MethodNotAllowed", "versioning route", &rid, &req.path),
+            _ => error_response(
+                sock,
+                405,
+                "MethodNotAllowed",
+                "versioning route",
+                &rid,
+                &req.path,
+            ),
         };
     }
     if has_q(&query, "versions") && key.is_empty() && method == "GET" {
@@ -87,7 +130,9 @@ pub fn dispatch<R: std::io::BufRead>(
 
     let result: std::io::Result<()> = match method.as_str() {
         "GET" if bucket.is_empty() => list_buckets(srv, sock, &rid),
-        "GET" if key.is_empty() && has_q(&query, "location") => bucket_location(srv, sock, &bucket, &rid),
+        "GET" if key.is_empty() && has_q(&query, "location") => {
+            bucket_location(srv, sock, &bucket, &rid)
+        }
         "HEAD" if key.is_empty() => head_bucket(srv, sock, &bucket, &rid),
         "PUT" if key.is_empty() => create_bucket(srv, sock, &bucket, &rid),
         "DELETE" if key.is_empty() => delete_bucket(srv, sock, &bucket, &rid),
@@ -99,16 +144,45 @@ pub fn dispatch<R: std::io::BufRead>(
             copy_object(srv, sock, &bucket, &key, &req.headers, &rid)
         }
         "PUT" => put_object(srv, &mut req, sock, &bucket, &key, &rid, chunk_ctx),
-        "GET" => get_object(srv, sock, &bucket, &key, &req.headers, &rid, false, version_id.as_deref()),
-        "HEAD" => get_object(srv, sock, &bucket, &key, &req.headers, &rid, true, version_id.as_deref()),
+        "GET" => get_object(
+            srv,
+            sock,
+            &bucket,
+            &key,
+            &req.headers,
+            &rid,
+            false,
+            version_id.as_deref(),
+        ),
+        "HEAD" => get_object(
+            srv,
+            sock,
+            &bucket,
+            &key,
+            &req.headers,
+            &rid,
+            true,
+            version_id.as_deref(),
+        ),
         "DELETE" => delete_object(srv, sock, &bucket, &key, version_id.as_deref(), &rid),
-        _ => error_response(sock, 501, "NotImplemented", "Method not supported", &rid, &req.path),
+        _ => error_response(
+            sock,
+            501,
+            "NotImplemented",
+            "Method not supported",
+            &rid,
+            &req.path,
+        ),
     };
     result
 }
 
 // Returns (bucket, key) from either virtual-hosted style or path style.
-fn resolve_addressing<R: std::io::BufRead>(srv: &Server, req: &Request<R>, path: &str) -> (String, String) {
+fn resolve_addressing<R: std::io::BufRead>(
+    srv: &Server,
+    req: &Request<R>,
+    path: &str,
+) -> (String, String) {
     let trimmed = path.trim_start_matches('/');
     if let (Some(domain), Some(host)) = (srv.domain.as_ref(), req.headers.get("host")) {
         let host = host.split(':').next().unwrap_or(host);
@@ -139,7 +213,9 @@ pub fn build_list_buckets(srv: &Server, rid: &str) -> crate::http::BuiltResponse
     let mut body = String::new();
     body.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     body.push_str(r#"<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">"#);
-    body.push_str("<Owner><ID>minibucket</ID><DisplayName>minibucket</DisplayName></Owner><Buckets>");
+    body.push_str(
+        "<Owner><ID>minibucket</ID><DisplayName>minibucket</DisplayName></Owner><Buckets>",
+    );
     for b in &buckets {
         body.push_str(&format!(
             "<Bucket><Name>{}</Name><CreationDate>{}</CreationDate></Bucket>",
@@ -159,7 +235,13 @@ fn list_buckets(srv: &Server, sock: &mut std::net::TcpStream, rid: &str) -> std:
 
 pub fn build_bucket_location(srv: &Server, bucket: &str, rid: &str) -> crate::http::BuiltResponse {
     if !srv.storage.bucket_exists(bucket) {
-        return build_error(404, "NoSuchBucket", "The specified bucket does not exist", rid, bucket);
+        return build_error(
+            404,
+            "NoSuchBucket",
+            "The specified bucket does not exist",
+            rid,
+            bucket,
+        );
     }
     let body = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{}</LocationConstraint>"#,
@@ -170,11 +252,21 @@ pub fn build_bucket_location(srv: &Server, bucket: &str, rid: &str) -> crate::ht
         .xml(body)
 }
 
-fn bucket_location(srv: &Server, sock: &mut std::net::TcpStream, bucket: &str, rid: &str) -> std::io::Result<()> {
+fn bucket_location(
+    srv: &Server,
+    sock: &mut std::net::TcpStream,
+    bucket: &str,
+    rid: &str,
+) -> std::io::Result<()> {
     build_bucket_location(srv, bucket, rid).write_to(sock)
 }
 
-fn head_bucket(srv: &Server, sock: &mut std::net::TcpStream, bucket: &str, rid: &str) -> std::io::Result<()> {
+fn head_bucket(
+    srv: &Server,
+    sock: &mut std::net::TcpStream,
+    bucket: &str,
+    rid: &str,
+) -> std::io::Result<()> {
     if srv.storage.bucket_exists(bucket) {
         let resp = Response::new(200)
             .header("x-amz-request-id", rid)
@@ -182,11 +274,23 @@ fn head_bucket(srv: &Server, sock: &mut std::net::TcpStream, bucket: &str, rid: 
         resp.write_headers(sock, Some(0))?;
         Ok(())
     } else {
-        error_response(sock, 404, "NoSuchBucket", "The specified bucket does not exist", rid, bucket)
+        error_response(
+            sock,
+            404,
+            "NoSuchBucket",
+            "The specified bucket does not exist",
+            rid,
+            bucket,
+        )
     }
 }
 
-fn create_bucket(srv: &Server, sock: &mut std::net::TcpStream, bucket: &str, rid: &str) -> std::io::Result<()> {
+fn create_bucket(
+    srv: &Server,
+    sock: &mut std::net::TcpStream,
+    bucket: &str,
+    rid: &str,
+) -> std::io::Result<()> {
     match srv.storage.create_bucket(bucket) {
         Ok(()) => {
             let resp = Response::new(200)
@@ -194,36 +298,62 @@ fn create_bucket(srv: &Server, sock: &mut std::net::TcpStream, bucket: &str, rid
                 .header("x-amz-request-id", rid);
             resp.write_headers(sock, Some(0))
         }
-        Err(StorageError::InvalidName) => {
-            error_response(sock, 400, "InvalidBucketName", "Bucket name is invalid", rid, bucket)
-        }
-        Err(StorageError::Exists) => {
-            error_response(sock, 409, "BucketAlreadyOwnedByYou", "Bucket exists", rid, bucket)
-        }
-        Err(e) => {
-            error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, bucket)
-        }
+        Err(StorageError::InvalidName) => error_response(
+            sock,
+            400,
+            "InvalidBucketName",
+            "Bucket name is invalid",
+            rid,
+            bucket,
+        ),
+        Err(StorageError::Exists) => error_response(
+            sock,
+            409,
+            "BucketAlreadyOwnedByYou",
+            "Bucket exists",
+            rid,
+            bucket,
+        ),
+        Err(e) => error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, bucket),
     }
 }
 
-fn delete_bucket(srv: &Server, sock: &mut std::net::TcpStream, bucket: &str, rid: &str) -> std::io::Result<()> {
+fn delete_bucket(
+    srv: &Server,
+    sock: &mut std::net::TcpStream,
+    bucket: &str,
+    rid: &str,
+) -> std::io::Result<()> {
     match srv.storage.delete_bucket(bucket) {
         Ok(()) => {
             let resp = Response::new(204).header("x-amz-request-id", rid);
             resp.write_headers(sock, Some(0))
         }
-        Err(StorageError::NotFound) => {
-            error_response(sock, 404, "NoSuchBucket", "The specified bucket does not exist", rid, bucket)
-        }
-        Err(StorageError::NotEmpty) => {
-            error_response(sock, 409, "BucketNotEmpty", "Bucket is not empty", rid, bucket)
-        }
-        Err(StorageError::InvalidName) => {
-            error_response(sock, 400, "InvalidBucketName", "Bucket name is invalid", rid, bucket)
-        }
-        Err(e) => {
-            error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, bucket)
-        }
+        Err(StorageError::NotFound) => error_response(
+            sock,
+            404,
+            "NoSuchBucket",
+            "The specified bucket does not exist",
+            rid,
+            bucket,
+        ),
+        Err(StorageError::NotEmpty) => error_response(
+            sock,
+            409,
+            "BucketNotEmpty",
+            "Bucket is not empty",
+            rid,
+            bucket,
+        ),
+        Err(StorageError::InvalidName) => error_response(
+            sock,
+            400,
+            "InvalidBucketName",
+            "Bucket name is invalid",
+            rid,
+            bucket,
+        ),
+        Err(e) => error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, bucket),
     }
 }
 
@@ -250,10 +380,20 @@ fn list_objects(
         marker
     };
 
-    let res = match srv.storage.list_objects(bucket, prefix, delimiter, max_keys, effective_marker) {
+    let res = match srv
+        .storage
+        .list_objects(bucket, prefix, delimiter, max_keys, effective_marker)
+    {
         Ok(r) => r,
         Err(StorageError::NotFound) => {
-            return error_response(sock, 404, "NoSuchBucket", "The specified bucket does not exist", rid, bucket);
+            return error_response(
+                sock,
+                404,
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+                rid,
+                bucket,
+            );
         }
         Err(e) => {
             return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, bucket);
@@ -273,13 +413,19 @@ fn list_objects(
         }
         body.push_str(&format!("<IsTruncated>{}</IsTruncated>", res.truncated));
         if let (true, Some(nm)) = (res.truncated, res.next_marker.as_ref()) {
-            body.push_str(&format!("<NextContinuationToken>{}</NextContinuationToken>", xml_escape(nm)));
+            body.push_str(&format!(
+                "<NextContinuationToken>{}</NextContinuationToken>",
+                xml_escape(nm)
+            ));
         }
     } else {
         body.push_str(r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">"#);
         body.push_str(&format!("<Name>{}</Name>", xml_escape(bucket)));
         body.push_str(&format!("<Prefix>{}</Prefix>", xml_escape(prefix)));
-        body.push_str(&format!("<Marker>{}</Marker>", xml_escape(marker.unwrap_or(""))));
+        body.push_str(&format!(
+            "<Marker>{}</Marker>",
+            xml_escape(marker.unwrap_or(""))
+        ));
         body.push_str(&format!("<MaxKeys>{}</MaxKeys>", max_keys));
         if let Some(d) = delimiter {
             body.push_str(&format!("<Delimiter>{}</Delimiter>", xml_escape(d)));
@@ -292,7 +438,10 @@ fn list_objects(
     for c in &res.contents {
         body.push_str("<Contents>");
         body.push_str(&format!("<Key>{}</Key>", xml_escape(&c.key)));
-        body.push_str(&format!("<LastModified>{}</LastModified>", iso8601(c.last_modified)));
+        body.push_str(&format!(
+            "<LastModified>{}</LastModified>",
+            iso8601(c.last_modified)
+        ));
         body.push_str(&format!("<ETag>&quot;{}&quot;</ETag>", c.etag));
         body.push_str(&format!("<Size>{}</Size>", c.size));
         body.push_str("<StorageClass>STANDARD</StorageClass>");
@@ -326,7 +475,14 @@ fn put_object<R: std::io::BufRead>(
         Err(StorageError::NotFound) => {
             // Drain body and return 404.
             drain_body(req)?;
-            return error_response(sock, 404, "NoSuchBucket", "The specified bucket does not exist", rid, bucket);
+            return error_response(
+                sock,
+                404,
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+                rid,
+                bucket,
+            );
         }
         Err(StorageError::InvalidName) => {
             drain_body(req)?;
@@ -344,7 +500,11 @@ fn put_object<R: std::io::BufRead>(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    let is_chunked = req.headers.get("content-encoding").map(|v| v.contains("aws-chunked")).unwrap_or(false);
+    let is_chunked = req
+        .headers
+        .get("content-encoding")
+        .map(|v| v.contains("aws-chunked"))
+        .unwrap_or(false);
     let content_sha = req.headers.get("x-amz-content-sha256").unwrap_or("");
     let streaming = is_chunked
         || content_sha == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
@@ -354,17 +514,30 @@ fn put_object<R: std::io::BufRead>(
         .headers
         .get("x-amz-decoded-content-length")
         .and_then(|v| v.parse().ok())
-        .or_else(|| req.headers.get("content-length").and_then(|v| v.parse().ok()));
+        .or_else(|| {
+            req.headers
+                .get("content-length")
+                .and_then(|v| v.parse().ok())
+        });
 
     let mut buf = vec![0u8; 64 * 1024];
     if streaming {
         let mut r = AwsChunkedReader::new(&mut req.reader).with_chunk_ctx(chunk_ctx);
         loop {
             let n = r.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             if let Err(e) = writer.write(&buf[..n]) {
                 writer.abort();
-                return error_response(sock, 500, "InternalError", &format!("write: {}", e), rid, key);
+                return error_response(
+                    sock,
+                    500,
+                    "InternalError",
+                    &format!("write: {}", e),
+                    rid,
+                    key,
+                );
             }
         }
     } else {
@@ -373,20 +546,41 @@ fn put_object<R: std::io::BufRead>(
             .get("content-length")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0u64);
-        let mut r = FixedReader { r: &mut req.reader, remaining };
+        let mut r = FixedReader {
+            r: &mut req.reader,
+            remaining,
+        };
         loop {
             let n = r.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             if let Err(e) = writer.write(&buf[..n]) {
                 writer.abort();
-                return error_response(sock, 500, "InternalError", &format!("write: {}", e), rid, key);
+                return error_response(
+                    sock,
+                    500,
+                    "InternalError",
+                    &format!("write: {}", e),
+                    rid,
+                    key,
+                );
             }
         }
     }
 
     let (etag, size, vid) = match writer.finish(&content_type) {
         Ok(v) => v,
-        Err(e) => return error_response(sock, 500, "InternalError", &format!("finalize: {}", e), rid, key),
+        Err(e) => {
+            return error_response(
+                sock,
+                500,
+                "InternalError",
+                &format!("finalize: {}", e),
+                rid,
+                key,
+            )
+        }
     };
 
     if let Some(d) = declared_len {
@@ -415,12 +609,30 @@ fn copy_object(
 ) -> std::io::Result<()> {
     let source = match headers.get("x-amz-copy-source") {
         Some(s) => s,
-        None => return error_response(sock, 400, "InvalidArgument", "missing x-amz-copy-source", rid, dst_key),
+        None => {
+            return error_response(
+                sock,
+                400,
+                "InvalidArgument",
+                "missing x-amz-copy-source",
+                rid,
+                dst_key,
+            )
+        }
     };
     let decoded = crate::url::percent_decode_str(source.trim_start_matches('/'));
     let (src_bucket, src_key) = match decoded.find('/') {
         Some(i) => (decoded[..i].to_string(), decoded[i + 1..].to_string()),
-        None => return error_response(sock, 400, "InvalidArgument", "copy-source must be /bucket/key", rid, dst_key),
+        None => {
+            return error_response(
+                sock,
+                400,
+                "InvalidArgument",
+                "copy-source must be /bucket/key",
+                rid,
+                dst_key,
+            )
+        }
     };
 
     let (meta, mut src_file) = match srv.storage.get_object(&src_bucket, &src_key) {
@@ -428,21 +640,48 @@ fn copy_object(
         Err(StorageError::NotFound) => {
             return error_response(sock, 404, "NoSuchKey", "source not found", rid, &src_key);
         }
-        Err(e) => return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, &src_key),
+        Err(e) => {
+            return error_response(
+                sock,
+                500,
+                "InternalError",
+                &format!("{:?}", e),
+                rid,
+                &src_key,
+            )
+        }
     };
 
     let mut writer = match srv.storage.put_object_writer(dst_bucket, dst_key) {
         Ok(w) => w,
         Err(StorageError::NotFound) => {
-            return error_response(sock, 404, "NoSuchBucket", "destination bucket missing", rid, dst_bucket);
+            return error_response(
+                sock,
+                404,
+                "NoSuchBucket",
+                "destination bucket missing",
+                rid,
+                dst_bucket,
+            );
         }
-        Err(e) => return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, dst_key),
+        Err(e) => {
+            return error_response(
+                sock,
+                500,
+                "InternalError",
+                &format!("{:?}", e),
+                rid,
+                dst_key,
+            )
+        }
     };
 
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = src_file.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         if let Err(e) = writer.write(&buf[..n]) {
             writer.abort();
             return error_response(sock, 500, "InternalError", &format!("{}", e), rid, dst_key);
@@ -450,7 +689,9 @@ fn copy_object(
     }
     let (etag, _size, _vid) = match writer.finish(&meta.content_type) {
         Ok(v) => v,
-        Err(e) => return error_response(sock, 500, "InternalError", &format!("{}", e), rid, dst_key),
+        Err(e) => {
+            return error_response(sock, 500, "InternalError", &format!("{}", e), rid, dst_key)
+        }
     };
     let now = crate::util::iso8601(
         std::time::SystemTime::now()
@@ -465,6 +706,8 @@ fn copy_object(
     write_xml(sock, 200, &body, rid)
 }
 
+// GET and HEAD share this; the argument list mirrors the request itself.
+#[allow(clippy::too_many_arguments)]
 fn get_object(
     srv: &Server,
     sock: &mut std::net::TcpStream,
@@ -478,22 +721,50 @@ fn get_object(
     let (meta, mut file) = match version_id {
         Some(v) => {
             if srv.storage.is_delete_marker(bucket, key, v) {
-                return error_response(sock, 405, "MethodNotAllowed", "version is a delete marker", rid, key);
+                return error_response(
+                    sock,
+                    405,
+                    "MethodNotAllowed",
+                    "version is a delete marker",
+                    rid,
+                    key,
+                );
             }
             match srv.storage.get_object_version(bucket, key, v) {
                 Ok(r) => r,
                 Err(StorageError::NotFound) => {
-                    return error_response(sock, 404, "NoSuchVersion", "version not found", rid, key);
+                    return error_response(
+                        sock,
+                        404,
+                        "NoSuchVersion",
+                        "version not found",
+                        rid,
+                        key,
+                    );
                 }
                 Err(e) => {
-                    return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, key);
+                    return error_response(
+                        sock,
+                        500,
+                        "InternalError",
+                        &format!("{:?}", e),
+                        rid,
+                        key,
+                    );
                 }
             }
         }
         None => match srv.storage.get_object(bucket, key) {
             Ok(r) => r,
             Err(StorageError::NotFound) => {
-                return error_response(sock, 404, "NoSuchKey", "The specified key does not exist", rid, key);
+                return error_response(
+                    sock,
+                    404,
+                    "NoSuchKey",
+                    "The specified key does not exist",
+                    rid,
+                    key,
+                );
             }
             Err(e) => {
                 return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, key);
@@ -528,7 +799,9 @@ fn get_object(
         resp = resp.header("Content-Range", &cr);
     }
     resp.write_headers(sock, Some(length))?;
-    if head_only { return Ok(()); }
+    if head_only {
+        return Ok(());
+    }
 
     if start > 0 {
         file.seek(SeekFrom::Start(start))?;
@@ -538,7 +811,9 @@ fn get_object(
     while remaining > 0 {
         let want = (remaining.min(buf.len() as u64)) as usize;
         let n = file.read(&mut buf[..want])?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         sock.write_all(&buf[..n])?;
         remaining -= n as u64;
     }
@@ -550,7 +825,11 @@ fn parse_range(v: &str) -> Option<(u64, Option<u64>)> {
     let mut parts = v.splitn(2, '-');
     let s: u64 = parts.next()?.parse().ok()?;
     let e = parts.next()?;
-    let end = if e.is_empty() { None } else { Some(e.parse().ok()?) };
+    let end = if e.is_empty() {
+        None
+    } else {
+        Some(e.parse().ok()?)
+    };
     Some((s, end))
 }
 
@@ -577,7 +856,9 @@ fn delete_object(
             Err(StorageError::NotFound) => {
                 return error_response(sock, 404, "NoSuchBucket", "no such bucket", rid, bucket);
             }
-            Err(e) => return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, key),
+            Err(e) => {
+                return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, key)
+            }
         }
     }
     match srv.storage.delete_object(bucket, key) {
@@ -590,9 +871,14 @@ fn delete_object(
             }
             resp.write_headers(sock, Some(0))
         }
-        Err(StorageError::NotFound) => {
-            error_response(sock, 404, "NoSuchBucket", "The specified bucket does not exist", rid, bucket)
-        }
+        Err(StorageError::NotFound) => error_response(
+            sock,
+            404,
+            "NoSuchBucket",
+            "The specified bucket does not exist",
+            rid,
+            bucket,
+        ),
         Err(e) => error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, key),
     }
 }
@@ -632,7 +918,9 @@ fn delete_objects<R: std::io::BufRead>(
             if let Some(e) = s[from..].find("</Key>") {
                 items.push((s[from..from + e].to_string(), None));
                 i = from + e + 6;
-            } else { break; }
+            } else {
+                break;
+            }
         }
     }
 
@@ -685,14 +973,25 @@ fn delete_objects<R: std::io::BufRead>(
 }
 
 pub fn read_body_all<R: std::io::BufRead>(req: &mut Request<R>) -> std::io::Result<Vec<u8>> {
-    let is_chunked = req.headers.get("content-encoding").map(|v| v.contains("aws-chunked")).unwrap_or(false);
+    let is_chunked = req
+        .headers
+        .get("content-encoding")
+        .map(|v| v.contains("aws-chunked"))
+        .unwrap_or(false);
     let mut out = Vec::new();
     if is_chunked {
         let mut r = AwsChunkedReader::new(&mut req.reader);
         r.read_to_end(&mut out)?;
     } else {
-        let remaining = req.headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0u64);
-        let mut r = FixedReader { r: &mut req.reader, remaining };
+        let remaining = req
+            .headers
+            .get("content-length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0u64);
+        let mut r = FixedReader {
+            r: &mut req.reader,
+            remaining,
+        };
         r.read_to_end(&mut out)?;
     }
     Ok(out)
@@ -705,7 +1004,12 @@ fn drain_body<R: std::io::BufRead>(req: &mut Request<R>) -> std::io::Result<()> 
 
 // ---------- response helpers ----------
 
-pub fn write_xml(sock: &mut std::net::TcpStream, status: u16, body: &str, rid: &str) -> std::io::Result<()> {
+pub fn write_xml(
+    sock: &mut std::net::TcpStream,
+    status: u16,
+    body: &str,
+    rid: &str,
+) -> std::io::Result<()> {
     let resp = Response::new(status)
         .header("x-amz-request-id", rid)
         .header("Content-Type", "application/xml");
@@ -769,18 +1073,15 @@ mod tests {
 
     #[test]
     fn parse_range_rejects_malformed() {
-        assert_eq!(parse_range("0-99"), None);          // missing prefix
-        assert_eq!(parse_range("bytes=abc"), None);     // bad start
-        assert_eq!(parse_range("bytes=0"), None);       // missing dash
-        assert_eq!(parse_range("bytes=0-xyz"), None);   // bad end
+        assert_eq!(parse_range("0-99"), None); // missing prefix
+        assert_eq!(parse_range("bytes=abc"), None); // bad start
+        assert_eq!(parse_range("bytes=0"), None); // missing dash
+        assert_eq!(parse_range("bytes=0-xyz"), None); // bad end
     }
 
     #[test]
     fn inner_text_finds_tag() {
-        assert_eq!(
-            inner_text("<X>hello</X>", "X").as_deref(),
-            Some("hello")
-        );
+        assert_eq!(inner_text("<X>hello</X>", "X").as_deref(), Some("hello"));
         assert_eq!(inner_text("<X>hello</X>", "Y"), None);
     }
 
@@ -793,7 +1094,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let mut p = std::env::temp_dir();
         p.push(format!("minibucket_handler_{}_{}", label, nanos));
         p
@@ -801,7 +1105,9 @@ mod tests {
 
     struct ScopedRoot(PathBuf);
     impl Drop for ScopedRoot {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn make_server(label: &str) -> (Server, ScopedRoot) {

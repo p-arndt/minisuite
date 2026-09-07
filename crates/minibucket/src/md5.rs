@@ -1,10 +1,9 @@
 // MD5 implementation (RFC 1321). Used only for S3 ETag values.
 
 const S: [u32; 64] = [
-    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
-    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9,
+    14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15,
+    21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
 ];
 
 const K: [u32; 64] = [
@@ -20,7 +19,10 @@ const K: [u32; 64] = [
 
 #[derive(Clone)]
 pub struct Md5 {
-    a: u32, b: u32, c: u32, d: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+    d: u32,
     buf: [u8; 64],
     len: usize,
     total: u64,
@@ -29,8 +31,13 @@ pub struct Md5 {
 impl Md5 {
     pub fn new() -> Self {
         Self {
-            a: 0x67452301, b: 0xefcdab89, c: 0x98badcfe, d: 0x10325476,
-            buf: [0; 64], len: 0, total: 0,
+            a: 0x67452301,
+            b: 0xefcdab89,
+            c: 0x98badcfe,
+            d: 0x10325476,
+            buf: [0; 64],
+            len: 0,
+            total: 0,
         }
     }
     pub fn update(&mut self, data: &[u8]) {
@@ -79,10 +86,7 @@ impl Md5 {
             } else {
                 (c ^ (b | (!d)), (7 * i) % 16)
             };
-            let t = a
-                .wrapping_add(f)
-                .wrapping_add(K[i])
-                .wrapping_add(m[g]);
+            let t = a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]);
             a = d;
             d = c;
             c = b;
@@ -98,12 +102,16 @@ impl Md5 {
         self.buf[self.len] = 0x80;
         self.len += 1;
         if self.len > 56 {
-            for i in self.len..64 { self.buf[i] = 0; }
+            for i in self.len..64 {
+                self.buf[i] = 0;
+            }
             let blk = self.buf;
             self.process(&blk);
             self.len = 0;
         }
-        for i in self.len..56 { self.buf[i] = 0; }
+        for i in self.len..56 {
+            self.buf[i] = 0;
+        }
         self.buf[56..64].copy_from_slice(&bits.to_le_bytes());
         let blk = self.buf;
         self.process(&blk);

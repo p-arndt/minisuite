@@ -168,7 +168,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let mut p = std::env::temp_dir();
         p.push(format!("minibucket_thandler_{}_{}", label, nanos));
         p
@@ -176,7 +179,9 @@ mod tests {
 
     struct ScopedRoot(PathBuf);
     impl Drop for ScopedRoot {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn make_server(label: &str) -> (Server, ScopedRoot) {

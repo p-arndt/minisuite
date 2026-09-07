@@ -88,7 +88,14 @@ pub fn canonical_request(
     payload_hash: &str,
 ) -> String {
     let parts = parse_query(query_raw);
-    canonical_request_pairs(method, raw_path, &parts, headers, signed_headers, payload_hash)
+    canonical_request_pairs(
+        method,
+        raw_path,
+        &parts,
+        headers,
+        signed_headers,
+        payload_hash,
+    )
 }
 
 // Same as canonical_request but takes already-parsed (decoded) query pairs.
@@ -180,7 +187,10 @@ pub fn verify(
         &info.signed_headers,
         &info.payload_hash,
     );
-    let scope = format!("{}/{}/{}/aws4_request", info.date, info.region, info.service);
+    let scope = format!(
+        "{}/{}/{}/aws4_request",
+        info.date, info.region, info.service
+    );
     let sts = string_to_sign(&info.amz_date, &scope, &canon);
     let key = signing_key(secret, &info.date, &info.region, &info.service);
     let sig = hex(&hmac_sha256(&key, sts.as_bytes()));
@@ -289,7 +299,10 @@ pub fn verify_presigned(
         &info.signed_headers,
         &info.payload_hash,
     );
-    let scope = format!("{}/{}/{}/aws4_request", info.date, info.region, info.service);
+    let scope = format!(
+        "{}/{}/{}/aws4_request",
+        info.date, info.region, info.service
+    );
     let sts = string_to_sign(&info.amz_date, &scope, &canon);
     let key = signing_key(secret, &info.date, &info.region, &info.service);
     let sig = hex(&hmac_sha256(&key, sts.as_bytes()));
@@ -318,7 +331,10 @@ pub struct ChunkContext {
 impl ChunkContext {
     pub fn new(secret: &str, info: &AuthInfo) -> Self {
         let key = signing_key(secret, &info.date, &info.region, &info.service);
-        let scope = format!("{}/{}/{}/aws4_request", info.date, info.region, info.service);
+        let scope = format!(
+            "{}/{}/{}/aws4_request",
+            info.date, info.region, info.service
+        );
         Self {
             signing_key: key,
             amz_date: info.amz_date.clone(),
@@ -343,7 +359,10 @@ impl ChunkContext {
             self.prev_signature = expected;
             Ok(())
         } else {
-            eprintln!("[sigv4-chunk] mismatch\n  expected: {}\n  got:      {}", expected, got);
+            eprintln!(
+                "[sigv4-chunk] mismatch\n  expected: {}\n  got:      {}",
+                expected, got
+            );
             Err(AuthError::BadSignature)
         }
     }
@@ -422,7 +441,10 @@ mod tests {
         assert!(matches!(parse_authorization(&h), Err(AuthError::Malformed)));
 
         // Right algorithm, missing pieces.
-        let h = headers_from(&[("Authorization", "AWS4-HMAC-SHA256 Credential=a/b/c/d/aws4_request")]);
+        let h = headers_from(&[(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=a/b/c/d/aws4_request",
+        )]);
         assert!(matches!(parse_authorization(&h), Err(AuthError::Malformed)));
     }
 
@@ -439,10 +461,7 @@ mod tests {
 
     #[test]
     fn canonical_request_orders_query_and_lowercases_headers() {
-        let h = headers_from(&[
-            ("Host", "example.com"),
-            ("X-Amz-Date", "20240101T000000Z"),
-        ]);
+        let h = headers_from(&[("Host", "example.com"), ("X-Amz-Date", "20240101T000000Z")]);
         let canon = canonical_request(
             "GET",
             "/bucket/key",

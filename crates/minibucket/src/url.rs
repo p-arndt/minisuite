@@ -70,6 +70,26 @@ pub fn encode_component(s: &str) -> String {
 }
 
 // Parse a query string into key/value pairs, keys/values percent-decoded.
+pub fn parse_query(q: &str) -> Vec<(String, String)> {
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for part in q.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(eq) = part.find('=') {
+            let k = percent_decode_str(&part[..eq]);
+            let v = percent_decode_str(&part[eq + 1..]);
+            out.push((k, v));
+        } else {
+            out.push((percent_decode_str(part), String::new()));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,7 +142,10 @@ mod tests {
     fn parse_query_empty_and_no_value() {
         assert!(parse_query("").is_empty());
         let q = parse_query("flag&k=v");
-        assert_eq!(q, vec![("flag".into(), "".into()), ("k".into(), "v".into())]);
+        assert_eq!(
+            q,
+            vec![("flag".into(), "".into()), ("k".into(), "v".into())]
+        );
     }
 
     #[test]
@@ -136,24 +159,4 @@ mod tests {
         let q = parse_query("a=1&&b=2");
         assert_eq!(q, vec![("a".into(), "1".into()), ("b".into(), "2".into())]);
     }
-}
-
-pub fn parse_query(q: &str) -> Vec<(String, String)> {
-    if q.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for part in q.split('&') {
-        if part.is_empty() {
-            continue;
-        }
-        if let Some(eq) = part.find('=') {
-            let k = percent_decode_str(&part[..eq]);
-            let v = percent_decode_str(&part[eq + 1..]);
-            out.push((k, v));
-        } else {
-            out.push((percent_decode_str(part), String::new()));
-        }
-    }
-    out
 }

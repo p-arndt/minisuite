@@ -11,7 +11,9 @@ pub struct Credentials {
 }
 
 impl Credentials {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn add(&mut self, access: &str, secret: &str) {
         self.map.insert(access.to_string(), secret.to_string());
@@ -21,7 +23,9 @@ impl Credentials {
         self.map.get(access).map(|s| s.as_str())
     }
 
-    pub fn is_empty(&self) -> bool { self.map.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
 
     // File format: lines of `ACCESS_KEY=SECRET_KEY`. `#` starts a comment.
     pub fn load_file(path: &Path) -> io::Result<Self> {
@@ -29,7 +33,9 @@ impl Credentials {
         let text = fs::read_to_string(path)?;
         for (i, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             let eq = line.find('=').ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -39,7 +45,10 @@ impl Credentials {
             let access = line[..eq].trim();
             let secret = line[eq + 1..].trim();
             if access.is_empty() || secret.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "blank key or secret"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "blank key or secret",
+                ));
             }
             c.add(access, secret);
         }
@@ -79,7 +88,7 @@ mod tests {
         writeln!(f, "# a comment").unwrap();
         writeln!(f, "AKIA=secret1").unwrap();
         writeln!(f, "  KEY2 = secret2   # trailing comment").unwrap();
-        writeln!(f, "").unwrap();
+        writeln!(f).unwrap();
         drop(f);
         let c = Credentials::load_file(&p).unwrap();
         assert_eq!(c.secret_for("AKIA"), Some("secret1"));

@@ -66,30 +66,44 @@ pub enum StorageError {
 }
 
 impl From<io::Error> for StorageError {
-    fn from(_: io::Error) -> Self { StorageError::Io }
+    fn from(_: io::Error) -> Self {
+        StorageError::Io
+    }
 }
 
 pub fn valid_bucket(name: &str) -> bool {
     let bytes = name.as_bytes();
-    if bytes.len() < 3 || bytes.len() > 63 { return false; }
+    if bytes.len() < 3 || bytes.len() > 63 {
+        return false;
+    }
     let mut prev_dot = false;
     for (i, &b) in bytes.iter().enumerate() {
         let ok = matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.');
-        if !ok { return false; }
+        if !ok {
+            return false;
+        }
         if (i == 0 || i == bytes.len() - 1) && (b == b'-' || b == b'.') {
             return false;
         }
-        if b == b'.' && prev_dot { return false; }
+        if b == b'.' && prev_dot {
+            return false;
+        }
         prev_dot = b == b'.';
     }
     true
 }
 
 pub fn valid_key(key: &str) -> bool {
-    if key.is_empty() || key.len() > 1024 { return false; }
-    if key.contains('\0') || key.contains('\\') { return false; }
+    if key.is_empty() || key.len() > 1024 {
+        return false;
+    }
+    if key.contains('\0') || key.contains('\\') {
+        return false;
+    }
     for seg in key.split('/') {
-        if seg == ".." || seg == "." { return false; }
+        if seg == ".." || seg == "." {
+            return false;
+        }
     }
     true
 }
@@ -121,7 +135,9 @@ impl Storage {
         self.bucket_dir(bucket).join("data").join(key)
     }
     fn meta_path(&self, bucket: &str, key: &str) -> PathBuf {
-        self.bucket_dir(bucket).join("meta").join(format!("{}.meta", key))
+        self.bucket_dir(bucket)
+            .join("meta")
+            .join(format!("{}.meta", key))
     }
     fn versions_dir(&self, bucket: &str, key: &str) -> PathBuf {
         self.bucket_dir(bucket).join("versions").join(key)
@@ -142,8 +158,14 @@ impl Storage {
         VersioningStatus::Disabled
     }
 
-    pub fn set_versioning_status(&self, bucket: &str, status: VersioningStatus) -> Result<(), StorageError> {
-        if !self.bucket_exists(bucket) { return Err(StorageError::NotFound); }
+    pub fn set_versioning_status(
+        &self,
+        bucket: &str,
+        status: VersioningStatus,
+    ) -> Result<(), StorageError> {
+        if !self.bucket_exists(bucket) {
+            return Err(StorageError::NotFound);
+        }
         let p = self.versioning_file(bucket);
         match status {
             VersioningStatus::Disabled => {
@@ -159,38 +181,58 @@ impl Storage {
     pub fn list_buckets(&self) -> io::Result<Vec<BucketInfo>> {
         let mut out = Vec::new();
         let dir = self.root.join("buckets");
-        if !dir.exists() { return Ok(out); }
+        if !dir.exists() {
+            return Ok(out);
+        }
         for ent in fs::read_dir(dir)? {
             let ent = ent?;
-            if !ent.file_type()?.is_dir() { continue; }
+            if !ent.file_type()?.is_dir() {
+                continue;
+            }
             let name = match ent.file_name().into_string() {
                 Ok(s) => s,
                 Err(_) => continue,
             };
             let marker = ent.path().join(".bucket");
-            if !marker.exists() { continue; }
+            if !marker.exists() {
+                continue;
+            }
             let created = read_marker_time(&marker).unwrap_or(0);
-            out.push(BucketInfo { name, creation_date: created });
+            out.push(BucketInfo {
+                name,
+                creation_date: created,
+            });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
 
     pub fn create_bucket(&self, bucket: &str) -> Result<(), StorageError> {
-        if !valid_bucket(bucket) { return Err(StorageError::InvalidName); }
+        if !valid_bucket(bucket) {
+            return Err(StorageError::InvalidName);
+        }
         let dir = self.bucket_dir(bucket);
-        if self.marker(bucket).exists() { return Err(StorageError::Exists); }
+        if self.marker(bucket).exists() {
+            return Err(StorageError::Exists);
+        }
         fs::create_dir_all(dir.join("data"))?;
         fs::create_dir_all(dir.join("meta"))?;
         let mut f = File::create(self.marker(bucket))?;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         writeln!(f, "{}", now)?;
         Ok(())
     }
 
     pub fn delete_bucket(&self, bucket: &str) -> Result<(), StorageError> {
-        if !valid_bucket(bucket) { return Err(StorageError::InvalidName); }
-        if !self.marker(bucket).exists() { return Err(StorageError::NotFound); }
+        if !valid_bucket(bucket) {
+            return Err(StorageError::InvalidName);
+        }
+        if !self.marker(bucket).exists() {
+            return Err(StorageError::NotFound);
+        }
         let data_dir = self.bucket_dir(bucket).join("data");
         let versions_dir = self.bucket_dir(bucket).join("versions");
         if has_any_file(&data_dir)? || has_any_file(&versions_dir)? {
@@ -205,14 +247,22 @@ impl Storage {
     }
 
     pub fn put_object_writer(&self, bucket: &str, key: &str) -> Result<ObjectWriter, StorageError> {
-        if !self.bucket_exists(bucket) { return Err(StorageError::NotFound); }
-        if !valid_key(key) { return Err(StorageError::InvalidName); }
+        if !self.bucket_exists(bucket) {
+            return Err(StorageError::NotFound);
+        }
+        if !valid_key(key) {
+            return Err(StorageError::InvalidName);
+        }
         let path = self.data_path(bucket, key);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("tmp-upload");
-        let file = OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
         let versioning = self.versioning_status(bucket);
         Ok(ObjectWriter {
             file,
@@ -227,9 +277,13 @@ impl Storage {
     }
 
     pub fn get_object(&self, bucket: &str, key: &str) -> Result<(ObjectMeta, File), StorageError> {
-        if !self.bucket_exists(bucket) { return Err(StorageError::NotFound); }
+        if !self.bucket_exists(bucket) {
+            return Err(StorageError::NotFound);
+        }
         let p = self.data_path(bucket, key);
-        if !p.exists() { return Err(StorageError::NotFound); }
+        if !p.exists() {
+            return Err(StorageError::NotFound);
+        }
         let meta = read_meta(&self.meta_path(bucket, key)).unwrap_or_else(|_| ObjectMeta {
             content_type: "application/octet-stream".into(),
             size: 0,
@@ -247,7 +301,9 @@ impl Storage {
         key: &str,
         version_id: &str,
     ) -> Result<(ObjectMeta, File), StorageError> {
-        if !self.bucket_exists(bucket) { return Err(StorageError::NotFound); }
+        if !self.bucket_exists(bucket) {
+            return Err(StorageError::NotFound);
+        }
         let vdir = self.versions_dir(bucket, key);
         let data = vdir.join(format!("{}.data", version_id));
         if !data.exists() {
@@ -275,7 +331,9 @@ impl Storage {
 
     // Returns Some(version_id) of the delete marker if versioning is on; None otherwise.
     pub fn delete_object(&self, bucket: &str, key: &str) -> Result<Option<String>, StorageError> {
-        if !self.bucket_exists(bucket) { return Err(StorageError::NotFound); }
+        if !self.bucket_exists(bucket) {
+            return Err(StorageError::NotFound);
+        }
         let versioning = self.versioning_status(bucket);
         let data_p = self.data_path(bucket, key);
         let meta_p = self.meta_path(bucket, key);
@@ -287,12 +345,17 @@ impl Storage {
             // Create the delete-marker sentinel.
             File::create(vdir.join(format!("{}.delete-marker", vid)))?;
             // Write meta for the marker (records the time + that it's a delete marker).
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             let mut mf = File::create(vdir.join(format!("{}.meta", vid)))?;
             writeln!(mf, "delete-marker: true")?;
             writeln!(mf, "last-modified: {}", now)?;
             // Remove the live mirror; previous versions still live under versions/.
-            if data_p.exists() { let _ = fs::remove_file(&data_p); }
+            if data_p.exists() {
+                let _ = fs::remove_file(&data_p);
+            }
             let _ = fs::remove_file(&meta_p);
             self.prune_empty_data_dirs(bucket, &data_p);
             return Ok(Some(vid));
@@ -312,7 +375,9 @@ impl Storage {
         key: &str,
         version_id: &str,
     ) -> Result<bool, StorageError> {
-        if !self.bucket_exists(bucket) { return Err(StorageError::NotFound); }
+        if !self.bucket_exists(bucket) {
+            return Err(StorageError::NotFound);
+        }
         let vdir = self.versions_dir(bucket, key);
         let data = vdir.join(format!("{}.data", version_id));
         let meta = vdir.join(format!("{}.meta", version_id));
@@ -333,11 +398,18 @@ impl Storage {
                     let versions_root = self.bucket_dir(bucket).join("versions");
                     let mut cur = vdir.parent().map(|p| p.to_path_buf());
                     while let Some(d) = cur {
-                        if d == versions_root || !d.starts_with(&versions_root) { break; }
-                        if fs::read_dir(&d).map(|mut it| it.next().is_none()).unwrap_or(false) {
+                        if d == versions_root || !d.starts_with(&versions_root) {
+                            break;
+                        }
+                        if fs::read_dir(&d)
+                            .map(|mut it| it.next().is_none())
+                            .unwrap_or(false)
+                        {
                             let _ = fs::remove_dir(&d);
                             cur = d.parent().map(|p| p.to_path_buf());
-                        } else { break; }
+                        } else {
+                            break;
+                        }
                     }
                 }
             }
@@ -395,11 +467,18 @@ impl Storage {
         let data_root = self.bucket_dir(bucket).join("data");
         let mut cur = last_path.parent().map(|p| p.to_path_buf());
         while let Some(d) = cur {
-            if d == data_root || !d.starts_with(&data_root) { break; }
-            if fs::read_dir(&d).map(|mut it| it.next().is_none()).unwrap_or(false) {
+            if d == data_root || !d.starts_with(&data_root) {
+                break;
+            }
+            if fs::read_dir(&d)
+                .map(|mut it| it.next().is_none())
+                .unwrap_or(false)
+            {
                 let _ = fs::remove_dir(&d);
                 cur = d.parent().map(|p| p.to_path_buf());
-            } else { break; }
+            } else {
+                break;
+            }
         }
     }
 
@@ -411,7 +490,9 @@ impl Storage {
         max_keys: usize,
         marker: Option<&str>,
     ) -> Result<ListResult, StorageError> {
-        if !self.bucket_exists(bucket) { return Err(StorageError::NotFound); }
+        if !self.bucket_exists(bucket) {
+            return Err(StorageError::NotFound);
+        }
         let data_root = self.bucket_dir(bucket).join("data");
         let mut all_keys: Vec<(String, fs::Metadata)> = Vec::new();
         walk(&data_root, &data_root, &mut all_keys)?;
@@ -423,9 +504,13 @@ impl Storage {
         let mut next_marker: Option<String> = None;
 
         for (key, md) in &all_keys {
-            if !key.starts_with(prefix) { continue; }
+            if !key.starts_with(prefix) {
+                continue;
+            }
             if let Some(m) = marker {
-                if key.as_str() <= m { continue; }
+                if key.as_str() <= m {
+                    continue;
+                }
             }
             if let Some(delim) = delimiter {
                 let rest = &key[prefix.len()..];
@@ -462,15 +547,24 @@ impl Storage {
             });
         }
 
-        Ok(ListResult { contents, common_prefixes, truncated, next_marker })
+        Ok(ListResult {
+            contents,
+            common_prefixes,
+            truncated,
+            next_marker,
+        })
     }
 
     // Walk all versions across all keys in the bucket.
     pub fn list_versions(&self, bucket: &str) -> Result<Vec<VersionEntry>, StorageError> {
-        if !self.bucket_exists(bucket) { return Err(StorageError::NotFound); }
+        if !self.bucket_exists(bucket) {
+            return Err(StorageError::NotFound);
+        }
         let vroot = self.bucket_dir(bucket).join("versions");
         let mut out = Vec::new();
-        if !vroot.exists() { return Ok(out); }
+        if !vroot.exists() {
+            return Ok(out);
+        }
         walk_versions(&vroot, &vroot, &mut out)?;
         // Group by key; within each key, mark the highest-vid non-marker entry as latest.
         out.sort_by(|a, b| match a.key.cmp(&b.key) {
@@ -545,13 +639,19 @@ impl ObjectWriter {
         fs::rename(&self.tmp_path, &self.final_path)?;
         let digest = self.md5.finalize();
         let etag = hex(&digest);
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         let version_id = if self.versioning.records_versions() {
             let vid = new_version_id();
             fs::create_dir_all(&self.versions_dir)?;
             // Mirror data + meta into the versions store.
-            fs::copy(&self.final_path, self.versions_dir.join(format!("{}.data", vid)))?;
+            fs::copy(
+                &self.final_path,
+                self.versions_dir.join(format!("{}.data", vid)),
+            )?;
             let mut vmf = File::create(self.versions_dir.join(format!("{}.meta", vid)))?;
             writeln!(vmf, "content-type: {}", content_type)?;
             writeln!(vmf, "size: {}", self.size)?;
@@ -579,7 +679,9 @@ impl ObjectWriter {
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, fs::Metadata)>) -> io::Result<()> {
-    if !dir.exists() { return Ok(()); }
+    if !dir.exists() {
+        return Ok(());
+    }
     for ent in fs::read_dir(dir)? {
         let ent = ent?;
         let ft = ent.file_type()?;
@@ -590,12 +692,16 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, fs::Metadata)>) -> io::R
             let rel = p.strip_prefix(root).unwrap_or(&p);
             let mut key = String::new();
             for (i, comp) in rel.components().enumerate() {
-                if i > 0 { key.push('/'); }
+                if i > 0 {
+                    key.push('/');
+                }
                 if let std::path::Component::Normal(s) = comp {
                     key.push_str(&s.to_string_lossy());
                 }
             }
-            if key.ends_with(".tmp-upload") { continue; }
+            if key.ends_with(".tmp-upload") {
+                continue;
+            }
             let md = ent.metadata()?;
             out.push((key, md));
         }
@@ -606,12 +712,15 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, fs::Metadata)>) -> io::R
 // Walk `versions/<...key.../>` and yield one VersionEntry per file we recognise.
 // Inside a key directory we see `<vid>.data`, `<vid>.meta`, `<vid>.delete-marker`.
 fn walk_versions(root: &Path, dir: &Path, out: &mut Vec<VersionEntry>) -> io::Result<()> {
-    if !dir.exists() { return Ok(()); }
+    if !dir.exists() {
+        return Ok(());
+    }
     // We need to know which directories represent a key (have any .data/.delete-marker
     // file directly inside). We descend until we find such files.
     let mut has_version_files = false;
     let mut subdirs: Vec<PathBuf> = Vec::new();
-    let mut by_vid: std::collections::HashMap<String, (Option<PathBuf>, bool, Option<PathBuf>)> = std::collections::HashMap::new();
+    let mut by_vid: std::collections::HashMap<String, (Option<PathBuf>, bool, Option<PathBuf>)> =
+        std::collections::HashMap::new();
     for ent in fs::read_dir(dir)? {
         let ent = ent?;
         let ft = ent.file_type()?;
@@ -639,7 +748,9 @@ fn walk_versions(root: &Path, dir: &Path, out: &mut Vec<VersionEntry>) -> io::Re
         let rel = dir.strip_prefix(root).unwrap_or(dir);
         let mut key = String::new();
         for (i, comp) in rel.components().enumerate() {
-            if i > 0 { key.push('/'); }
+            if i > 0 {
+                key.push('/');
+            }
             if let std::path::Component::Normal(s) = comp {
                 key.push_str(&s.to_string_lossy());
             }
@@ -657,9 +768,12 @@ fn walk_versions(root: &Path, dir: &Path, out: &mut Vec<VersionEntry>) -> io::Re
             }
             if let Some(dp) = &data {
                 if let Ok(md) = fs::metadata(dp) {
-                    if size == 0 { size = md.len(); }
+                    if size == 0 {
+                        size = md.len();
+                    }
                     if last_modified == 0 {
-                        last_modified = md.modified()
+                        last_modified = md
+                            .modified()
                             .ok()
                             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                             .map(|d| d.as_secs())
@@ -686,13 +800,17 @@ fn walk_versions(root: &Path, dir: &Path, out: &mut Vec<VersionEntry>) -> io::Re
 }
 
 fn has_any_file(dir: &Path) -> io::Result<bool> {
-    if !dir.exists() { return Ok(false); }
+    if !dir.exists() {
+        return Ok(false);
+    }
     for ent in fs::read_dir(dir)? {
         let ent = ent?;
         let ft = ent.file_type()?;
-        if ft.is_file() { return Ok(true); }
-        if ft.is_dir() {
-            if has_any_file(&ent.path())? { return Ok(true); }
+        if ft.is_file() {
+            return Ok(true);
+        }
+        if ft.is_dir() && has_any_file(&ent.path())? {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -706,7 +824,9 @@ fn read_marker_time(p: &Path) -> io::Result<u64> {
 }
 
 fn read_meta(p: &Path) -> Result<ObjectMeta, StorageError> {
-    if !p.exists() { return Err(StorageError::NotFound); }
+    if !p.exists() {
+        return Err(StorageError::NotFound);
+    }
     let mut f = File::open(p)?;
     let mut s = String::new();
     f.read_to_string(&mut s)?;
@@ -716,13 +836,25 @@ fn read_meta(p: &Path) -> Result<ObjectMeta, StorageError> {
     let mut last_modified = 0u64;
     let mut version_id: Option<String> = None;
     for line in s.lines() {
-        if let Some(v) = line.strip_prefix("content-type: ") { content_type = v.to_string(); }
-        else if let Some(v) = line.strip_prefix("size: ") { size = v.parse().unwrap_or(0); }
-        else if let Some(v) = line.strip_prefix("etag: ") { etag = v.to_string(); }
-        else if let Some(v) = line.strip_prefix("last-modified: ") { last_modified = v.parse().unwrap_or(0); }
-        else if let Some(v) = line.strip_prefix("version-id: ") { version_id = Some(v.to_string()); }
+        if let Some(v) = line.strip_prefix("content-type: ") {
+            content_type = v.to_string();
+        } else if let Some(v) = line.strip_prefix("size: ") {
+            size = v.parse().unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("etag: ") {
+            etag = v.to_string();
+        } else if let Some(v) = line.strip_prefix("last-modified: ") {
+            last_modified = v.parse().unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("version-id: ") {
+            version_id = Some(v.to_string());
+        }
     }
-    Ok(ObjectMeta { content_type, size, etag, last_modified, version_id })
+    Ok(ObjectMeta {
+        content_type,
+        size,
+        etag,
+        last_modified,
+        version_id,
+    })
 }
 
 #[cfg(test)]
@@ -731,7 +863,10 @@ mod tests {
     use std::io::Read;
 
     fn tmp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let mut p = std::env::temp_dir();
         p.push(format!("minibucket_test_{}_{}", label, nanos));
         p
@@ -784,8 +919,8 @@ mod tests {
         let a = new_version_id();
         let b = new_version_id();
         assert_ne!(a, b);
-        // Same-second ids must still sort.
-        assert!(a < b || a > b);
+        // Same-second ids must still sort (i.e. they are strictly ordered).
+        assert!(a < b);
     }
 
     #[test]
@@ -798,7 +933,10 @@ mod tests {
         s.delete_bucket("buck").unwrap();
         assert!(!s.bucket_exists("buck"));
         // Missing delete.
-        assert!(matches!(s.delete_bucket("buck"), Err(StorageError::NotFound)));
+        assert!(matches!(
+            s.delete_bucket("buck"),
+            Err(StorageError::NotFound)
+        ));
     }
 
     #[test]
@@ -823,7 +961,10 @@ mod tests {
         assert_eq!(buf, b"hello world");
 
         assert!(s.delete_object("buck", "k.txt").unwrap().is_none());
-        assert!(matches!(s.get_object("buck", "k.txt"), Err(StorageError::NotFound)));
+        assert!(matches!(
+            s.get_object("buck", "k.txt"),
+            Err(StorageError::NotFound)
+        ));
     }
 
     #[test]
@@ -832,7 +973,10 @@ mod tests {
         s.create_bucket("buck").unwrap();
         let w = s.put_object_writer("buck", "k").unwrap();
         w.finish("application/octet-stream").unwrap();
-        assert!(matches!(s.delete_bucket("buck"), Err(StorageError::NotEmpty)));
+        assert!(matches!(
+            s.delete_bucket("buck"),
+            Err(StorageError::NotEmpty)
+        ));
     }
 
     #[test]
@@ -860,7 +1004,9 @@ mod tests {
         assert!(!r.truncated);
 
         // Prefix + delimiter: collapses "dir/*" into the common prefix "dir/".
-        let r = s.list_objects("buck", "dir/", Some("/"), 1000, None).unwrap();
+        let r = s
+            .list_objects("buck", "dir/", Some("/"), 1000, None)
+            .unwrap();
         let keys: Vec<&str> = r.contents.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, vec!["dir/x", "dir/y"]);
 
@@ -876,11 +1022,14 @@ mod tests {
         let (s, _g) = fresh("versioning_status");
         s.create_bucket("buck").unwrap();
         assert_eq!(s.versioning_status("buck"), VersioningStatus::Disabled);
-        s.set_versioning_status("buck", VersioningStatus::Enabled).unwrap();
+        s.set_versioning_status("buck", VersioningStatus::Enabled)
+            .unwrap();
         assert_eq!(s.versioning_status("buck"), VersioningStatus::Enabled);
-        s.set_versioning_status("buck", VersioningStatus::Suspended).unwrap();
+        s.set_versioning_status("buck", VersioningStatus::Suspended)
+            .unwrap();
         assert_eq!(s.versioning_status("buck"), VersioningStatus::Suspended);
-        s.set_versioning_status("buck", VersioningStatus::Disabled).unwrap();
+        s.set_versioning_status("buck", VersioningStatus::Disabled)
+            .unwrap();
         assert_eq!(s.versioning_status("buck"), VersioningStatus::Disabled);
     }
 
@@ -888,7 +1037,8 @@ mod tests {
     fn versioning_records_writes_and_deletes() {
         let (s, _g) = fresh("versioning_writes");
         s.create_bucket("buck").unwrap();
-        s.set_versioning_status("buck", VersioningStatus::Enabled).unwrap();
+        s.set_versioning_status("buck", VersioningStatus::Enabled)
+            .unwrap();
 
         // First put.
         let mut w = s.put_object_writer("buck", "k").unwrap();
@@ -910,9 +1060,15 @@ mod tests {
         assert_eq!(buf, b"v1");
 
         // Delete creates a delete marker; live mirror is gone.
-        let dvid = s.delete_object("buck", "k").unwrap().expect("delete marker vid");
+        let dvid = s
+            .delete_object("buck", "k")
+            .unwrap()
+            .expect("delete marker vid");
         assert!(s.is_delete_marker("buck", "k", &dvid));
-        assert!(matches!(s.get_object("buck", "k"), Err(StorageError::NotFound)));
+        assert!(matches!(
+            s.get_object("buck", "k"),
+            Err(StorageError::NotFound)
+        ));
 
         // list_versions returns three entries (v1, v2, delete-marker).
         let versions = s.list_versions("buck").unwrap();
@@ -943,7 +1099,12 @@ mod tests {
         s.create_bucket("zebra").unwrap();
         s.create_bucket("alpha").unwrap();
         s.create_bucket("mango").unwrap();
-        let names: Vec<String> = s.list_buckets().unwrap().into_iter().map(|b| b.name).collect();
+        let names: Vec<String> = s
+            .list_buckets()
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
         assert_eq!(names, vec!["alpha", "mango", "zebra"]);
         // All carry a non-zero creation_date.
         for b in s.list_buckets().unwrap() {
@@ -954,8 +1115,14 @@ mod tests {
     #[test]
     fn create_bucket_rejects_invalid_name() {
         let (s, _g) = fresh("invalid_bucket");
-        assert!(matches!(s.create_bucket("AB"), Err(StorageError::InvalidName)));
-        assert!(matches!(s.create_bucket("-bad"), Err(StorageError::InvalidName)));
+        assert!(matches!(
+            s.create_bucket("AB"),
+            Err(StorageError::InvalidName)
+        ));
+        assert!(matches!(
+            s.create_bucket("-bad"),
+            Err(StorageError::InvalidName)
+        ));
     }
 
     #[test]

@@ -4,15 +4,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DAY_NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTH_NAMES: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
 // Days since epoch -> (year, month 1-12, day 1-31, weekday 0=Sun)
 fn civil_from_days(days: i64) -> (i32, u32, u32, u32) {
     // Howard Hinnant's date algorithms.
     let z = days + 719468;
-    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    let era = if z >= 0 {
+        z / 146097
+    } else {
+        (z - 146096) / 146097
+    };
     let doe = (z - era * 146097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe as i64 + era * 400;
@@ -33,7 +36,10 @@ pub fn http_date_now() -> String {
 
 // Current wall-clock time as seconds since the Unix epoch.
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 pub fn http_date(secs: u64) -> String {
@@ -49,7 +55,9 @@ pub fn http_date(secs: u64) -> String {
         d,
         MONTH_NAMES[(mo - 1) as usize],
         y,
-        h, m, s
+        h,
+        m,
+        s
     )
 }
 
@@ -88,7 +96,11 @@ pub fn parse_amz_date(s: &str) -> Option<u64> {
     let se: i64 = s[13..15].parse().ok()?;
     let days = days_from_civil(y, mo, d);
     let total = days * 86400 + h * 3600 + mi * 60 + se;
-    if total < 0 { None } else { Some(total as u64) }
+    if total < 0 {
+        None
+    } else {
+        Some(total as u64)
+    }
 }
 
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -186,6 +198,8 @@ mod tests {
     fn request_id_is_hex_16() {
         let r = request_id();
         assert_eq!(r.len(), 16);
-        assert!(r.chars().all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_uppercase())));
+        assert!(r
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_uppercase())));
     }
 }

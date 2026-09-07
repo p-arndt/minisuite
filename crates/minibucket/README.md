@@ -5,7 +5,7 @@ A tiny, **dependency-free** S3-compatible object storage server, written in pure
 No `tokio`, no `hyper`, no `aws-sdk`, no `ring` just the standard library. The whole thing is around 3.5k lines of code and compiles into a single static binary you can drop on any machine.
 
 ```
-$ cargo build --release
+$ cargo build --release -p minibucket
 $ ./target/release/minibucket
 minibucket listening on http://127.0.0.1:9000 (root: ./data)
   region: us-east-1
@@ -45,10 +45,13 @@ It's useful for:
 
 ## Install
 
+minibucket lives in the [minisuite](https://github.com/p-arndt/minisuite)
+workspace. Build it from the repository root:
+
 ```bash
-git clone https://github.com/p-arndt/minibucket
-cd minibucket
-cargo build --release
+git clone https://github.com/p-arndt/minisuite
+cd minisuite
+cargo build --release -p minibucket
 ```
 
 The resulting `target/release/minibucket` is self-contained.
@@ -78,11 +81,15 @@ docker run --rm -p 9000:9000 -v minibucket-data:/data \
   ghcr.io/p-arndt/minibucket:latest --bind 0.0.0.0:9000 --root /data --anonymous
 ```
 
-To build the image yourself:
+Every option can also be given as an environment variable, which is usually
+nicer in compose files:
 
 ```bash
-docker build -t minibucket .
+docker run --rm -p 9000:9000 -v minibucket-data:/data   -e MINIBUCKET_ACCESS_KEY=alice -e MINIBUCKET_SECRET_KEY=alicepass   ghcr.io/p-arndt/minibucket:latest
 ```
+
+To build the image yourself, use the workspace Dockerfile at the repository
+root (see the minisuite README for the exact invocation).
 
 ## Usage
 
@@ -96,6 +103,31 @@ Usage: minibucket [options]
   --region R               default us-east-1
   --domain D               enable virtual-hosted addressing for bucket.D
   --anonymous              disable auth (dev only)
+  -h, --help               show this help
+  -V, --version            show the version
+```
+
+### Environment variables
+
+Every flag has an environment-variable twin: `MINIBUCKET_` plus the flag name in
+upper case with dashes replaced by underscores. Boolean flags accept
+`1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
+
+| Flag | Environment variable |
+| --- | --- |
+| `--bind` | `MINIBUCKET_BIND` |
+| `--root` | `MINIBUCKET_ROOT` |
+| `--access-key` | `MINIBUCKET_ACCESS_KEY` |
+| `--secret-key` | `MINIBUCKET_SECRET_KEY` |
+| `--credentials` | `MINIBUCKET_CREDENTIALS` |
+| `--region` | `MINIBUCKET_REGION` |
+| `--domain` | `MINIBUCKET_DOMAIN` |
+| `--anonymous` | `MINIBUCKET_ANONYMOUS` |
+
+The environment is read first and command-line flags override it:
+
+```bash
+MINIBUCKET_BIND=0.0.0.0:9000 MINIBUCKET_ANONYMOUS=1 minibucket
 ```
 
 ### Examples
@@ -134,6 +166,34 @@ Anonymous (no auth — local dev only):
 minibucket --anonymous
 ```
 
+### Use as a library
+
+The crate is also a library, so you can embed the server in your own process —
+that is how the `minisuite` launcher runs it alongside the other services. The
+split is deliberate: `parse_args` only reads configuration, `prepare` does
+everything that can fail (bind the socket, create the root directory, load
+credentials) and `serve` blocks. Nothing in the library calls
+`std::process::exit`.
+
+```rust
+let cfg = minibucket::parse_args(std::env::args().skip(1))?; // or Config::default()
+let ready = minibucket::prepare(cfg)?;
+eprint!("{}", ready.banner());
+std::thread::spawn(move || ready.serve());
+```
+
+`Prepared` is `Send`, and `Config` is `Clone + Debug` with public fields, so you
+can also build one by hand:
+
+```rust
+let cfg = minibucket::Config {
+    bind: "127.0.0.1:9000".to_string(),
+    root: "./data".into(),
+    keys: vec![("alice".to_string(), "alicepass".to_string())],
+    ..Default::default()
+};
+```
+
 ## On-disk layout
 
 Objects live as plain files under `--root`:
@@ -151,7 +211,8 @@ You can `ls`, `cat`, back up, or sync the directory with normal tools, there's n
 
 ```
 src/
-  main.rs        # arg parsing, accept loop, per-connection auth
+  main.rs        # thin CLI wrapper around the library
+  lib.rs         # config/env parsing, startup, accept loop, per-connection auth
   http.rs        # minimal HTTP/1.1 request parser + response writer
   s3.rs          # S3 API dispatch and XML responses
   sigv4.rs       # AWS SigV4 signing + streaming chunk verification

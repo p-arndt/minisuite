@@ -9,9 +9,9 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024;
 
 pub struct Request<R: BufRead = BufReader<TcpStream>> {
     pub method: String,
-    pub raw_path: String,   // /bucket/key (still percent-encoded)
-    pub path: String,       // percent-decoded path
-    pub query_raw: String,  // a=1&b=2 (still encoded)
+    pub raw_path: String,  // /bucket/key (still percent-encoded)
+    pub path: String,      // percent-decoded path
+    pub query_raw: String, // a=1&b=2 (still encoded)
     pub headers: Headers,
     pub reader: R,
 }
@@ -25,7 +25,9 @@ pub struct Headers {
 
 impl Headers {
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.map.get(&name.to_ascii_lowercase()).map(|(_, v)| v.as_str())
+        self.map
+            .get(&name.to_ascii_lowercase())
+            .map(|(_, v)| v.as_str())
     }
     pub fn insert(&mut self, name: &str, value: &str) {
         let lc = name.to_ascii_lowercase();
@@ -65,7 +67,10 @@ pub fn read_request(stream: TcpStream) -> io::Result<Request<BufReader<TcpStream
         }
         total += nr;
         if total > MAX_HEADER_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "headers too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "headers too large",
+            ));
         }
         let trimmed = hl.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
@@ -78,7 +83,14 @@ pub fn read_request(stream: TcpStream) -> io::Result<Request<BufReader<TcpStream
         }
     }
 
-    Ok(Request { method, raw_path, path, query_raw, headers, reader })
+    Ok(Request {
+        method,
+        raw_path,
+        path,
+        query_raw,
+        headers,
+        reader,
+    })
 }
 
 fn read_line_limited<R: BufRead>(r: &mut R, out: &mut String, limit: usize) -> io::Result<usize> {
@@ -124,7 +136,13 @@ pub struct AwsChunkedReader<'a, R: BufRead> {
 
 impl<'a, R: BufRead> AwsChunkedReader<'a, R> {
     pub fn new(r: &'a mut R) -> Self {
-        Self { r, buf: Vec::new(), pos: 0, done: false, chunk_ctx: None }
+        Self {
+            r,
+            buf: Vec::new(),
+            pos: 0,
+            done: false,
+            chunk_ctx: None,
+        }
     }
     pub fn with_chunk_ctx(mut self, ctx: Option<crate::sigv4::ChunkContext>) -> Self {
         self.chunk_ctx = ctx;
@@ -224,7 +242,11 @@ pub struct Response {
 impl Response {
     pub fn new(status: u16) -> Self {
         let text = status_text(status);
-        Self { status, status_text: text, headers: Vec::new() }
+        Self {
+            status,
+            status_text: text,
+            headers: Vec::new(),
+        }
     }
     pub fn header(mut self, k: &str, v: &str) -> Self {
         self.headers.push((k.to_string(), v.to_string()));
@@ -239,11 +261,21 @@ impl Response {
         let mut have_server = false;
         for (k, v) in &self.headers {
             let lk = k.to_ascii_lowercase();
-            if lk == "content-length" { have_len = true; }
-            if lk == "content-type" { have_type = true; }
-            if lk == "connection" { have_conn = true; }
-            if lk == "date" { have_date = true; }
-            if lk == "server" { have_server = true; }
+            if lk == "content-length" {
+                have_len = true;
+            }
+            if lk == "content-type" {
+                have_type = true;
+            }
+            if lk == "connection" {
+                have_conn = true;
+            }
+            if lk == "date" {
+                have_date = true;
+            }
+            if lk == "server" {
+                have_server = true;
+            }
             write!(w, "{}: {}\r\n", k, v)?;
         }
         if !have_type {
@@ -285,6 +317,7 @@ impl Body {
             Body::Stream(_) => None,
         }
     }
+    #[allow(dead_code)] // only the tests drain a Body in-process; production streams it to the socket
     pub fn into_bytes(self) -> io::Result<Vec<u8>> {
         match self {
             Body::Empty => Ok(Vec::new()),
@@ -308,7 +341,11 @@ pub struct BuiltResponse {
 
 impl BuiltResponse {
     pub fn new(status: u16) -> Self {
-        Self { status, headers: Vec::new(), body: Body::Empty }
+        Self {
+            status,
+            headers: Vec::new(),
+            body: Body::Empty,
+        }
     }
     pub fn header(mut self, k: &str, v: &str) -> Self {
         self.headers.push((k.to_string(), v.to_string()));
@@ -321,16 +358,24 @@ impl BuiltResponse {
     }
     pub fn xml(mut self, body: String) -> Self {
         // Mark as XML if not already set.
-        let has_ct = self.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+        let has_ct = self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
         if !has_ct {
-            self.headers.push(("Content-Type".into(), "application/xml".into()));
+            self.headers
+                .push(("Content-Type".into(), "application/xml".into()));
         }
         self.body = Body::Bytes(body.into_bytes());
         self
     }
     pub fn write_to<W: Write>(self, w: &mut W) -> io::Result<()> {
         let len_hint = self.body.len_hint();
-        let resp = Response { status: self.status, status_text: status_text(self.status), headers: self.headers };
+        let resp = Response {
+            status: self.status,
+            status_text: status_text(self.status),
+            headers: self.headers,
+        };
         resp.write_headers(w, len_hint)?;
         match self.body {
             Body::Empty => {}
@@ -339,7 +384,9 @@ impl BuiltResponse {
                 let mut buf = [0u8; 64 * 1024];
                 loop {
                     let n = r.read(&mut buf)?;
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     w.write_all(&buf[..n])?;
                 }
             }
@@ -347,6 +394,7 @@ impl BuiltResponse {
         Ok(())
     }
 
+    #[allow(dead_code)] // test helper: assert on a response without writing it out
     pub fn header_value(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()

@@ -5,11 +5,7 @@ use crate::s3::{error_response, read_body_all, write_xml, Server};
 use crate::storage::{StorageError, VersioningStatus};
 use crate::util::{iso8601, xml_escape};
 
-pub fn build_get_versioning(
-    srv: &Server,
-    bucket: &str,
-    rid: &str,
-) -> crate::http::BuiltResponse {
+pub fn build_get_versioning(srv: &Server, bucket: &str, rid: &str) -> crate::http::BuiltResponse {
     if !srv.storage.bucket_exists(bucket) {
         return crate::s3::build_error(404, "NoSuchBucket", "no such bucket", rid, bucket);
     }
@@ -117,21 +113,35 @@ pub fn list_versions(
 
     let mut count = 0usize;
     for v in &versions {
-        if !v.key.starts_with(prefix) { continue; }
-        if count >= max_keys { break; }
+        if !v.key.starts_with(prefix) {
+            continue;
+        }
+        if count >= max_keys {
+            break;
+        }
         count += 1;
-        let tag = if v.is_delete_marker { "DeleteMarker" } else { "Version" };
+        let tag = if v.is_delete_marker {
+            "DeleteMarker"
+        } else {
+            "Version"
+        };
         body.push_str(&format!("<{}>", tag));
         body.push_str(&format!("<Key>{}</Key>", xml_escape(&v.key)));
-        body.push_str(&format!("<VersionId>{}</VersionId>", xml_escape(&v.version_id)));
+        body.push_str(&format!(
+            "<VersionId>{}</VersionId>",
+            xml_escape(&v.version_id)
+        ));
         body.push_str(&format!("<IsLatest>{}</IsLatest>", v.is_latest));
-        body.push_str(&format!("<LastModified>{}</LastModified>", iso8601(v.last_modified)));
+        body.push_str(&format!(
+            "<LastModified>{}</LastModified>",
+            iso8601(v.last_modified)
+        ));
         if !v.is_delete_marker {
             body.push_str(&format!("<ETag>&quot;{}&quot;</ETag>", v.etag));
             body.push_str(&format!("<Size>{}</Size>", v.size));
             body.push_str("<StorageClass>STANDARD</StorageClass>");
         }
-        body.push_str(&format!("<Owner><ID>minibucket</ID><DisplayName>minibucket</DisplayName></Owner>"));
+        body.push_str("<Owner><ID>minibucket</ID><DisplayName>minibucket</DisplayName></Owner>");
         body.push_str(&format!("</{}>", tag));
     }
 
@@ -178,7 +188,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let mut p = std::env::temp_dir();
         p.push(format!("minibucket_vhandler_{}_{}", label, nanos));
         p
@@ -186,7 +199,9 @@ mod tests {
 
     struct ScopedRoot(PathBuf);
     impl Drop for ScopedRoot {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn make_server(label: &str) -> (Server, ScopedRoot) {

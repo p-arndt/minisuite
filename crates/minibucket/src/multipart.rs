@@ -41,14 +41,15 @@ fn part_meta(srv: &Server, bucket: &str, upload_id: &str, n: u32) -> PathBuf {
 fn new_upload_id() -> String {
     // 32 hex chars derived from time + a counter.
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
     let c = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mix1 = n
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);
-    let mix2 = (n ^ c)
-        .wrapping_mul(0x9E3779B97F4A7C15)
-        .wrapping_add(c);
+    let mix2 = (n ^ c).wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(c);
     format!("{:016X}{:016X}", mix1, mix2)
 }
 
@@ -69,8 +70,13 @@ pub fn create_multipart(
     let upload_id = new_upload_id();
     let dir = upload_dir(srv, bucket, &upload_id);
     fs::create_dir_all(dir.join("parts"))?;
-    let ct = headers.get("content-type").unwrap_or("application/octet-stream");
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let ct = headers
+        .get("content-type")
+        .unwrap_or("application/octet-stream");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let mut info = File::create(dir.join(".info"))?;
     writeln!(info, "{}", now)?;
     writeln!(info, "{}", ct)?;
@@ -85,6 +91,9 @@ pub fn create_multipart(
     write_xml(sock, 200, &body, rid)
 }
 
+// Nine parameters, but they are all the pieces S3 puts in one UploadPart
+// request; bundling them into a struct would only move the noise.
+#[allow(clippy::too_many_arguments)]
 pub fn upload_part<R: std::io::BufRead>(
     srv: &Server,
     req: &mut Request<R>,
@@ -96,19 +105,41 @@ pub fn upload_part<R: std::io::BufRead>(
     rid: &str,
     chunk_ctx: Option<crate::sigv4::ChunkContext>,
 ) -> std::io::Result<()> {
-    if part_number < 1 || part_number > 10_000 {
-        return error_response(sock, 400, "InvalidArgument", "partNumber out of range", rid, upload_id);
+    if !(1..=10_000).contains(&part_number) {
+        return error_response(
+            sock,
+            400,
+            "InvalidArgument",
+            "partNumber out of range",
+            rid,
+            upload_id,
+        );
     }
     let dir = upload_dir(srv, bucket, upload_id);
     if !dir.exists() {
-        return error_response(sock, 404, "NoSuchUpload", "unknown uploadId", rid, upload_id);
+        return error_response(
+            sock,
+            404,
+            "NoSuchUpload",
+            "unknown uploadId",
+            rid,
+            upload_id,
+        );
     }
     let data_path = part_path(srv, bucket, upload_id, part_number);
-    let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(&data_path)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&data_path)?;
     let mut md5 = Md5::new();
     let mut size: u64 = 0;
 
-    let is_chunked = req.headers.get("content-encoding").map(|v| v.contains("aws-chunked")).unwrap_or(false);
+    let is_chunked = req
+        .headers
+        .get("content-encoding")
+        .map(|v| v.contains("aws-chunked"))
+        .unwrap_or(false);
     let content_sha = req.headers.get("x-amz-content-sha256").unwrap_or("");
     let streaming = is_chunked
         || content_sha == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
@@ -119,17 +150,28 @@ pub fn upload_part<R: std::io::BufRead>(
         let mut r = AwsChunkedReader::new(&mut req.reader).with_chunk_ctx(chunk_ctx);
         loop {
             let n = r.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             file.write_all(&buf[..n])?;
             md5.update(&buf[..n]);
             size += n as u64;
         }
     } else {
-        let remaining = req.headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0u64);
-        let mut r = FixedReader { r: &mut req.reader, remaining };
+        let remaining = req
+            .headers
+            .get("content-length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0u64);
+        let mut r = FixedReader {
+            r: &mut req.reader,
+            remaining,
+        };
         loop {
             let n = r.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             file.write_all(&buf[..n])?;
             md5.update(&buf[..n]);
             size += n as u64;
@@ -162,13 +204,23 @@ pub fn complete_multipart<R: std::io::BufRead>(
 ) -> std::io::Result<()> {
     let dir = upload_dir(srv, bucket, upload_id);
     if !dir.exists() {
-        return error_response(sock, 404, "NoSuchUpload", "unknown uploadId", rid, upload_id);
+        return error_response(
+            sock,
+            404,
+            "NoSuchUpload",
+            "unknown uploadId",
+            rid,
+            upload_id,
+        );
     }
     // Read content-type from .info.
     let info_text = fs::read_to_string(dir.join(".info")).unwrap_or_default();
     let mut lines = info_text.lines();
     let _ = lines.next();
-    let content_type = lines.next().unwrap_or("application/octet-stream").to_string();
+    let content_type = lines
+        .next()
+        .unwrap_or("application/octet-stream")
+        .to_string();
 
     // Parse request body to learn the part order requested by the client.
     let body = read_body_all(req)?;
@@ -201,16 +253,26 @@ pub fn complete_multipart<R: std::io::BufRead>(
         let p = part_path(srv, bucket, upload_id, *n);
         if !p.exists() {
             writer.abort();
-            return error_response(sock, 400, "InvalidPart", &format!("missing part {}", n), rid, key);
+            return error_response(
+                sock,
+                400,
+                "InvalidPart",
+                &format!("missing part {}", n),
+                rid,
+                key,
+            );
         }
         let mut f = File::open(&p)?;
         loop {
             let n = f.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             writer.write(&buf[..n])?;
         }
         // Pull the part's md5 hex from the meta file and decode to bytes.
-        let meta_text = fs::read_to_string(part_meta(srv, bucket, upload_id, *n)).unwrap_or_default();
+        let meta_text =
+            fs::read_to_string(part_meta(srv, bucket, upload_id, *n)).unwrap_or_default();
         let first_line = meta_text.lines().next().unwrap_or("");
         if let Some(bytes) = decode_hex16(first_line) {
             part_md5s.extend_from_slice(&bytes);
@@ -249,7 +311,14 @@ pub fn abort_multipart(
 ) -> std::io::Result<()> {
     let dir = upload_dir(srv, bucket, upload_id);
     if !dir.exists() {
-        return error_response(sock, 404, "NoSuchUpload", "unknown uploadId", rid, upload_id);
+        return error_response(
+            sock,
+            404,
+            "NoSuchUpload",
+            "unknown uploadId",
+            rid,
+            upload_id,
+        );
     }
     fs::remove_dir_all(&dir)?;
     let resp = Response::new(204).header("x-amz-request-id", rid);
@@ -267,15 +336,25 @@ pub fn list_parts(
 ) -> std::io::Result<()> {
     let dir = upload_dir(srv, bucket, upload_id);
     if !dir.exists() {
-        return error_response(sock, 404, "NoSuchUpload", "unknown uploadId", rid, upload_id);
+        return error_response(
+            sock,
+            404,
+            "NoSuchUpload",
+            "unknown uploadId",
+            rid,
+            upload_id,
+        );
     }
     let mut parts: Vec<(u32, String, u64)> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir.join("parts")) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.ends_with(".meta") { continue; }
+            if name.ends_with(".meta") {
+                continue;
+            }
             if let Ok(n) = name.parse::<u32>() {
-                let meta = fs::read_to_string(part_meta(srv, bucket, upload_id, n)).unwrap_or_default();
+                let meta =
+                    fs::read_to_string(part_meta(srv, bucket, upload_id, n)).unwrap_or_default();
                 let mut it = meta.lines();
                 let etag = it.next().unwrap_or("").to_string();
                 let size: u64 = it.next().unwrap_or("0").parse().unwrap_or(0);
@@ -312,7 +391,12 @@ pub fn list_multipart_uploads(
     if !srv.storage.bucket_exists(bucket) {
         return error_response(sock, 404, "NoSuchBucket", "no such bucket", rid, bucket);
     }
-    let uploads_dir = srv.storage.root.join("buckets").join(bucket).join("uploads");
+    let uploads_dir = srv
+        .storage
+        .root
+        .join("buckets")
+        .join(bucket)
+        .join("uploads");
     let mut entries: Vec<(String, String, u64)> = Vec::new();
     if let Ok(rd) = fs::read_dir(&uploads_dir) {
         for e in rd.flatten() {
@@ -328,7 +412,9 @@ pub fn list_multipart_uploads(
     entries.sort_by(|a, b| a.1.cmp(&b.1));
     let mut body = String::new();
     body.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-    body.push_str(r#"<ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">"#);
+    body.push_str(
+        r#"<ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">"#,
+    );
     body.push_str(&format!("<Bucket>{}</Bucket>", xml_escape(bucket)));
     body.push_str("<IsTruncated>false</IsTruncated>");
     for (id, key, ts) in &entries {
@@ -352,12 +438,14 @@ fn extract_inner(s: &str, tag: &str) -> Option<String> {
 
 fn decode_hex16(s: &str) -> Option<[u8; 16]> {
     let s = s.trim();
-    if s.len() != 32 { return None; }
+    if s.len() != 32 {
+        return None;
+    }
     let mut out = [0u8; 16];
-    for i in 0..16 {
+    for (i, byte) in out.iter_mut().enumerate() {
         let h = hex_nibble(s.as_bytes()[i * 2])?;
         let l = hex_nibble(s.as_bytes()[i * 2 + 1])?;
-        out[i] = (h << 4) | l;
+        *byte = (h << 4) | l;
     }
     Some(out)
 }
@@ -380,7 +468,9 @@ fn rewrite_meta_etag(srv: &Server, bucket: &str, key: &str, new_etag: &str) -> s
         .join(bucket)
         .join("meta")
         .join(format!("{}.meta", key));
-    if !path.exists() { return Ok(()); }
+    if !path.exists() {
+        return Ok(());
+    }
     let text = fs::read_to_string(&path)?;
     let mut out = String::new();
     let mut wrote = false;
