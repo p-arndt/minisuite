@@ -8,7 +8,7 @@ JSON and HTTP/1.1 are all hand-written. The whole thing compiles into a single
 binary you can drop on any machine.
 
 ```
-$ cargo build --release
+$ cargo build --release -p minicloak
 $ ./target/release/minicloak
 minicloak listening on http://127.0.0.1:9500
   signing key: ephemeral 2048 bit, generated in 172ms (use --key to persist)
@@ -49,16 +49,17 @@ endpoint, so anything that can validate a standard signature (Spring Security,
 
 ## Install
 
-Grab a binary from the [releases page](https://github.com/p-arndt/minicloak/releases)
+Grab a binary from the [releases page](https://github.com/p-arndt/minisuite/releases)
 — Linux (x86_64 / aarch64, static musl), Windows (x86_64) and macOS (Apple silicon
 / Intel). There is nothing to install alongside it.
 
-Or build from source:
+minicloak lives in the [minisuite](https://github.com/p-arndt/minisuite) workspace,
+so build it from the repository root:
 
 ```bash
-git clone https://github.com/p-arndt/minicloak
-cd minicloak
-cargo build --release
+git clone https://github.com/p-arndt/minisuite
+cd minisuite
+cargo build --release -p minicloak
 ```
 
 The resulting `target/release/minicloak` is self-contained.
@@ -70,9 +71,11 @@ docker pull ghcr.io/p-arndt/minicloak:latest
 docker run --rm -p 9500:9500 -v minicloak-data:/data ghcr.io/p-arndt/minicloak:latest
 ```
 
-Or build the image yourself:
+Or build the image yourself. The Dockerfile now lives at the workspace root, so
+build from there (see the minisuite README for the exact invocation):
 
 ```bash
+cd /path/to/minisuite
 docker build -t minicloak .
 docker run --rm -p 9500:9500 -v minicloak-data:/data minicloak
 ```
@@ -155,10 +158,54 @@ Usage: minicloak [options]
   -h, --help               show this help
   -V, --version            print the version and exit
 
+Every flag has an environment variable: MINICLOAK_ + the flag name uppercased
+with dashes turned into underscores (--key-bits -> MINICLOAK_KEY_BITS). Booleans
+take 1|true|yes|on or 0|false|no|off; MINICLOAK_USER and MINICLOAK_CLIENT hold
+several specs separated by ';'. A flag on the command line beats the env var.
+
 In the config file a client sets exactly one of `secret = "..."` or `public = true`.
 An inline --client spec marks a public client with the secret `public`, or an empty one.
 A public client must use PKCE.
 A redirect URI may end in `/*` to allow any path below it, or be exactly `*` to allow any URI.
+```
+
+### Environment variables
+
+Every flag has an equivalent environment variable, which is handy in Docker,
+compose files and CI where there is no command line to edit. The name is
+`MINICLOAK_` plus the flag name uppercased, with dashes turned into underscores:
+
+| Flag | Variable | Flag | Variable |
+| --- | --- | --- | --- |
+| `--bind` | `MINICLOAK_BIND` | `--access-ttl` | `MINICLOAK_ACCESS_TTL` |
+| `--realm` | `MINICLOAK_REALM` | `--refresh-ttl` | `MINICLOAK_REFRESH_TTL` |
+| `--issuer` | `MINICLOAK_ISSUER` | `--code-ttl` | `MINICLOAK_CODE_TTL` |
+| `--config` | `MINICLOAK_CONFIG` | `--session-ttl` | `MINICLOAK_SESSION_TTL` |
+| `--user` | `MINICLOAK_USER` | `--auto-login` | `MINICLOAK_AUTO_LOGIN` |
+| `--client` | `MINICLOAK_CLIENT` | `--no-quick-login` | `MINICLOAK_NO_QUICK_LOGIN` |
+| `--key` | `MINICLOAK_KEY` | `--no-cors` | `MINICLOAK_NO_CORS` |
+| `--key-bits` | `MINICLOAK_KEY_BITS` | | |
+
+Rules:
+
+- **Precedence** is flag > environment variable > default, so a flag on the
+  command line always wins.
+- **Booleans** (`MINICLOAK_NO_QUICK_LOGIN`, `MINICLOAK_NO_CORS`) take
+  `1`, `true`, `yes` or `on` to turn the flag on, and `0`, `false`, `no` or
+  `off` to leave it off. The comparison is case-insensitive.
+- **Repeatable flags** (`MINICLOAK_USER`, `MINICLOAK_CLIENT`) hold several specs
+  in one variable, separated by a **semicolon** `;`. The spec syntax itself uses
+  `=`, `:` and `,`, so a semicolon can never appear inside a well-formed spec.
+- An **unset or empty** variable is ignored, so `MINICLOAK_ISSUER=` in a compose
+  file means "no override" rather than an empty issuer.
+
+```bash
+export MINICLOAK_BIND=0.0.0.0:9500
+export MINICLOAK_KEY=/data/key.pem
+export MINICLOAK_AUTO_LOGIN=carol
+export MINICLOAK_USER="carol=carolpass:carol@example.com:Carol Quinn:admin;dave=davepass"
+export MINICLOAK_NO_CORS=true
+minicloak
 ```
 
 ### Examples
@@ -182,6 +229,39 @@ Add a user and a client inline, without a file:
 minicloak \
   --user "carol=carolpass:carol@example.com:Carol Quinn:admin,staff" \
   --client "cli=topsecret:http://localhost:8080/*"
+```
+
+### Use as a library
+
+The crate ships a library next to the binary, so another program can run the
+same server in a thread. Startup is split in two: `parse_args` turns arguments
+(and the `MINICLOAK_*` variables) into a `Config`, and `prepare` does everything
+that can fail — bind the socket, read the config file, load or generate the
+signing key. Nothing in the library ever calls `std::process::exit`.
+
+```rust
+// Config::default() == the documented flag defaults; tweak the fields you care
+// about, or take them from the command line with parse_args.
+let mut cfg = minicloak::Config::default();
+cfg.bind = "127.0.0.1:9500".to_string();
+cfg.key_path = Some("./key.pem".into());
+
+let ready = minicloak::prepare(cfg)?;   // io::Result<Prepared>
+eprint!("{}", ready.banner());          // the usual startup summary
+std::thread::spawn(move || ready.serve()); // Prepared is Send; serve() blocks
+```
+
+`parse_args` takes an iterator of arguments **without** argv[0] and returns
+`Result<Config, CliError>`. A `CliError` with `code == 0` is `--help` or
+`--version`, where `message` is the text the user asked for; `code == 2` is a
+bad flag or a bad value.
+
+```rust
+match minicloak::parse_args(std::env::args().skip(1)) {
+    Ok(cfg) => { /* ... */ }
+    Err(e) if e.code == 0 => println!("{}", e.message),
+    Err(e) => { eprintln!("{}", e.message); std::process::exit(e.code) }
+}
 ```
 
 ## Configuration file
@@ -262,6 +342,11 @@ minicloak \
   --user "carol=carolpass:carol@example.com:Carol Quinn:admin,staff" \
   --client "cli=topsecret:http://localhost:8080/*"
 ```
+
+`--config` is read first and the inline specs are applied on top, so a `--user`
+with the same username overrides the one from the file — that is the point of
+the terse spec. Defining no users or clients at all falls back to the built-in
+`alice`/`bob` and `myapp`/`spa`.
 
 ## Endpoints
 
@@ -374,41 +459,31 @@ against.
 
 ## Testing
 
+From the workspace root:
+
 ```bash
-cargo test              # 124 unit tests
-python smoketest.py     # 63 end-to-end checks against a running server
+cargo test -p minicloak                  # 171 unit tests
+python crates/minicloak/smoketest.py     # 63 end-to-end checks against a running server
 ```
 
 `smoketest.py` drives the real HTTP surface and verifies every RS256 signature
 independently in Python (plain integer arithmetic against the published JWKS),
 so a bug in minicloak's own crypto cannot make the suite pass. Start a server
-first, or use `just smoke`, which builds, launches one on port 19500, runs the
-suite and shuts it down.
+first, or use the workspace's `just smoke`, which builds, launches one on port
+19500, runs the suite and shuts it down.
 
-`just ci` runs the whole gate locally — the same one `.github/workflows/ci.yml`
-runs on Linux, Windows and macOS. CI additionally checks the hand-written RSA
-against OpenSSL: `openssl rsa -check` must accept the generated key, and
+The workspace `just ci` runs the whole gate locally — the same one CI runs on
+Linux, Windows and macOS. CI additionally checks the hand-written RSA against
+OpenSSL: `openssl rsa -check` must accept the generated key, and
 `openssl dgst -verify` must accept a token minted by minicloak.
 
 ## Releasing
 
-The version lives in exactly one place, the `version` key of `[package]` in
-`Cargo.toml`; the binary reads it back through `env!("CARGO_PKG_VERSION")` for
-`--version` and its `Server:` header.
-
-```bash
-just version                 # print the current version
-just set-version 0.2.0       # stamp it, without committing
-just release                 # patch bump -> commit, tag v0.1.1, push
-just release minor           # or: major, or an explicit 1.0.0
-```
-
-`just release` refuses to run on a dirty tree, so the release commit contains
-only the version bump. Pushing the tag triggers the "Build and Publish Release"
-workflow, which builds the binaries for every target, attaches them to a GitHub
-release along with notes generated from the commit log, and pushes the
-multi-arch container image to `ghcr.io`.
+The version comes from `[workspace.package]` in the root `Cargo.toml` — one
+number for the whole suite. The binary reads it back through
+`env!("CARGO_PKG_VERSION")` for `--version` and its `Server:` header. See the
+minisuite README for the release workflow.
 
 ## License
 
-MIT
+MIT — see the `LICENSE` file at the root of the minisuite repository.
