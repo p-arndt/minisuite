@@ -17,7 +17,8 @@ mod rand;
 mod rsa;
 mod sha256;
 mod store;
-mod toml;
+/// Minimal TOML subset parser; public because minisuite shares it.
+pub mod toml;
 mod url;
 mod users;
 mod util;

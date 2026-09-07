@@ -1,0 +1,21 @@
+[package]
+name = "minisuite"
+description = "minicloak + minimail + minibucket in one process: a tiny local dev backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "minisuite"
+path = "src/main.rs"
+
+# Path deps only: the suite is the three servers linked together, and the whole
+# point of the workspace is that none of them pulls anything from crates.io.
+[dependencies]
+minicloak = { path = "../minicloak" }
+minimail = { path = "../minimail" }
+minibucket = { path = "../minibucket" }

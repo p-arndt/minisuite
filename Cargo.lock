@@ -131,6 +131,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "minisuite"
+version = "0.2.0"
+dependencies = [
+ "minibucket",
+ "minicloak",
+ "minimail",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

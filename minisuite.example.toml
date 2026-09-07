@@ -1,0 +1,124 @@
+# minisuite.toml  (pass with  minisuite --config minisuite.toml,
+#                  or drop it next to the binary as ./minisuite.toml)
+#
+# minisuite runs minicloak, minimail and minibucket in one process. It does not
+# define any flags of its own for them: every key below is that crate's CLI flag
+# with the leading dashes removed, and minisuite simply rebuilds the command line
+# and hands it to the crate. So the authoritative list of keys for a section is
+# the output of `minicloak --help`, `minimail --help` or `minibucket --help`.
+#
+# Conversion rules
+#   key = "value"     ->  --key value
+#   key = 1234        ->  --key 1234
+#   key = ["a", "b"]  ->  --key a --key b     (for repeatable flags)
+#   key = true        ->  --key               (a bare on/off flag)
+#   key = false       ->  nothing at all      (but still suppresses the
+#                                              matching minisuite default)
+#   key_with_underscores and key-with-dashes are the same key.
+#
+# Relative paths (config, key, root, credentials, tls-cert, tls-key) resolve
+# against the directory THIS FILE lives in, not the working directory.
+#
+# Precedence per service, highest first:
+#   1. this file
+#   2. the service's own environment  (MINICLOAK_*, MINIMAIL_*, MINIBUCKET_*)
+#   3. minisuite's defaults           (the --data layout; --bind-all binds)
+#   4. the crate's own defaults
+# A minisuite default is skipped whenever this file sets that key or the matching
+# service environment variable is set — so
+#   MINIMAIL_SMTP_BIND=0.0.0.0:2525 minisuite --bind-all
+# really does move SMTP to 2525 instead of being overridden back to 1025.
+#
+# This file is a real (small) TOML subset: '#' comments, quoted strings,
+# true/false, integers and arrays. Inline tables, [[arrays of tables]], floats
+# and multi-line strings are rejected with a line number. An unknown section is
+# an error, so a typo like [minimails] never silently does nothing.
+#
+# The credentials below are DEV DEFAULTS and deliberately trivial. Do not expose
+# these servers to a network you do not trust.
+#
+# Shipped in the release archive next to the binaries.
+
+# ---------------------------------------------------------------------------
+# minicloak — OpenID Connect provider (default :9500)
+# ---------------------------------------------------------------------------
+[minicloak]
+bind = "127.0.0.1:9500"
+
+# The realm name that appears in the issuer URL: http://<host>/realms/<realm>.
+realm = "dev"
+
+# Pin the issuer instead of deriving it from each request's Host header. Useful
+# when a container and your browser disagree about what "localhost" means.
+# issuer = "http://localhost:9500/realms/dev"
+
+# Users and clients in full detail (see crates/minicloak/minicloak.example.toml).
+# Relative to THIS file's directory.
+# config = "minicloak.toml"
+
+# ...or inline, one spec per array element:
+#   username=password:email:First Last:role1,role2
+user = ["alice=alice", "bob=bob"]
+
+# client_id=secret:redirect_uri[,uri...]   (secret `public` marks a PKCE client)
+# client = ["myapp=s3cret:http://localhost:3000/*", "spa=public:http://localhost:5173/*"]
+
+# Without this key, minisuite writes <data>/minicloak/key.pem. Set it to move
+# the RSA signing key somewhere else.
+# key = "keys/minicloak.pem"
+
+# 1024 makes startup noticeably faster; 2048 is the default and the sane one.
+# key_bits = 2048
+
+# Token lifetimes, in seconds.
+# access_ttl = 300
+# refresh_ttl = 1800
+
+# Skip the login form entirely and always sign in as this user.
+# auto_login = "alice"
+
+# Bare flags: present means on, `false` means "leave it at the crate default".
+# no_quick_login = true
+# no_cors = false
+
+# ---------------------------------------------------------------------------
+# minimail — SMTP sink (:1025) + web UI / JSON API (:8025)
+# ---------------------------------------------------------------------------
+[minimail]
+# Underscores or dashes, whichever you prefer: smtp_bind == smtp-bind.
+smtp_bind = "127.0.0.1:1025"
+http_bind = "127.0.0.1:8025"
+
+# Without this key, minisuite uses <data>/minimail as the spool.
+# root = "mail"
+
+# Credentials for SMTP AUTH and HTTP Basic. Use `anonymous` instead for a sink
+# that accepts anything from anyone — which is what most dev setups want.
+anonymous = true
+# user = "minimail"
+# password = "minimail"
+
+# Refuse anything larger, and keep only the newest N messages.
+# max_size = 26214400
+# max_messages = 500
+
+# ---------------------------------------------------------------------------
+# minibucket — S3-compatible object storage (default :9000)
+# ---------------------------------------------------------------------------
+[minibucket]
+bind = "127.0.0.1:9000"
+
+# Without this key, minisuite uses <data>/minibucket as the object root.
+# root = "objects"
+
+# The single built-in key pair. Both halves are required together.
+access_key = "minioadmin"
+secret_key = "minioadmin"
+
+# region = "us-east-1"
+
+# Virtual-hosted-style addressing for <bucket>.<domain>.
+# domain = "localhost"
+
+# Drop the credentials above and set this for an entirely open bucket server.
+# anonymous = true
