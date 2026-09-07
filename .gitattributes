@@ -1,0 +1,4 @@
+# Normalize all text to LF in the repository; check out with LF everywhere.
+# The tree is authored on Windows but built and tested on Linux CI, and a CRLF
+# that leaks into the justfile or smoketest.py breaks there.
+* text=auto eol=lf

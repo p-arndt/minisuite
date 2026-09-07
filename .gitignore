@@ -1,0 +1,6 @@
+target/
+data/
+mail/
+*.pem
+__pycache__/
+minisuite.toml
