@@ -1,0 +1,232 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.2.0 or 0.2.0-rc.1 ("v" prefix optional). Leave empty to use the Cargo.toml version with a unique "-pre.<run>" suffix.'
+        required: false
+        type: string
+      prerelease:
+        description: "Mark as a GitHub pre-release (also skips the Docker 'latest' tag)."
+        required: false
+        type: boolean
+        default: true
+      draft:
+        description: "Create the GitHub release as a draft to review before publishing."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      draft: ${{ steps.resolve.outputs.draft }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: resolve
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+            if [ -z "$version" ]; then
+              # No version given: derive from Cargo.toml and add a unique
+              # "-pre.<run>" suffix so re-runs never collide with an existing
+              # tag/release (this was the old pipeline's failure mode).
+              base="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+              version="${base}-pre.${{ github.run_number }}"
+            fi
+            # Normalise the "v" prefix.
+            case "$version" in v*) ;; *) version="v$version" ;; esac
+            prerelease="${{ inputs.prerelease }}"
+            draft="${{ inputs.draft }}"
+          else
+            # Tag push: use the pushed tag verbatim.
+            version="${GITHUB_REF_NAME}"
+            draft=false
+            # A semver pre-release identifier (v1.2.3-rc.1) flags it automatically.
+            case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          fi
+          echo "Resolved version: $version (prerelease=$prerelease draft=$draft)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            archive: tar.gz
+            linker: aarch64-linux-gnu-gcc
+            apt: gcc-aarch64-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            rustflags: "-C target-feature=+crt-static"
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross linker (Linux aarch64)
+        if: matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y musl-tools ${{ matrix.apt }}
+
+      - name: Configure cross linker (Linux aarch64)
+        if: matrix.linker != ''
+        run: |
+          mkdir -p .cargo
+          printf '[target.%s]\nlinker = "%s"\n' "${{ matrix.target }}" "${{ matrix.linker }}" >> .cargo/config.toml
+
+      - name: Build
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          name="minimail-${VERSION:-dev}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/minimail" "dist/$name/"
+          cp README.md "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $name = "minimail-$($env:VERSION ?? 'dev')-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/minimail.exe" "dist/$name/"
+          if (Test-Path README.md) { Copy-Item README.md "dist/$name/" }
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash | Out-File "dist/$name.zip.sha256" -Encoding ascii
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: minimail-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+  docker:
+    name: Build and push Docker image
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # Don't upload the `*.dockerbuild` build-record artifact. It's useless to
+      # the release job and its flaky download was what failed the old pipeline.
+      DOCKER_BUILD_RECORD_UPLOAD: false
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # `value` makes semver tags work on manual dispatch (no git tag ref).
+          # The `latest` tag is only applied to stable (non-pre-release) versions;
+          # metadata-action already skips {{major}}.{{minor}} for pre-releases.
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.version.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.prerelease == 'false' }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ needs.version.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Publish release
+    needs: [version, build, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          # Only the binary artifacts; skip the `*.dockerbuild` build record
+          # that docker/build-push-action uploads automatically.
+          pattern: minimail-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          # On manual dispatch this creates the tag at the selected ref;
+          # on a tag push it reuses the pushed tag.
+          tag_name: ${{ needs.version.outputs.version }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          draft: ${{ needs.version.outputs.draft == 'true' }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          generate_release_notes: true

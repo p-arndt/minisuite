@@ -1,0 +1,101 @@
+<!-- minimail web UI: two-pane mail client over the JSON API + SSE. -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>minimail</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+          <rect width="64" height="64" rx="14" fill="#4f46e5"/>
+          <path d="M16 22h32a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H16a3 3 0 0 1-3-3V25a3 3 0 0 1 3-3z"
+                fill="none" stroke="#fff" stroke-width="3.2" stroke-linejoin="round"/>
+          <path d="M14.5 24.5 32 36l17.5-11.5" fill="none" stroke="#fff"
+                stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="name">minimail</span>
+      </div>
+
+      <div class="search">
+        <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M16.5 16.5 21 21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <input id="search" type="search" placeholder="Search subject, from, to…"
+               autocomplete="off" spellcheck="false" aria-label="Search messages">
+      </div>
+
+      <div class="tools">
+        <span id="conn" class="conn" title="Live connection">
+          <span class="dot"></span><span class="conn-label">connecting</span>
+        </span>
+        <span id="addrs" class="addrs"></span>
+        <button id="clear-all" class="btn btn-danger" type="button">Clear all</button>
+      </div>
+    </header>
+
+    <main class="panes">
+      <section class="list-pane" aria-label="Messages">
+        <ul id="msg-list" class="msg-list"></ul>
+        <div id="list-empty" class="empty" hidden>
+          <svg viewBox="0 0 64 64" class="empty-art" aria-hidden="true">
+            <path d="M12 22h40a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H12a3 3 0 0 1-3-3V25a3 3 0 0 1 3-3z"
+                  fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+            <path d="M10 24 32 40 54 24" fill="none" stroke="currentColor"
+                  stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <p class="empty-title">No messages captured yet</p>
+          <p class="empty-sub" id="empty-hint">Point your SMTP client here and mail will appear instantly.</p>
+        </div>
+      </section>
+
+      <section class="preview-pane" aria-label="Preview">
+        <div id="preview-empty" class="empty">
+          <svg viewBox="0 0 64 64" class="empty-art" aria-hidden="true">
+            <path d="M18 12h20l10 10v30a2 2 0 0 1-2 2H18a2 2 0 0 1-2-2V14a2 2 0 0 1 2-2z"
+                  fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+            <path d="M38 12v10h10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+          </svg>
+          <p class="empty-title">Nothing selected</p>
+          <p class="empty-sub">Pick a message from the list to preview it.</p>
+        </div>
+
+        <article id="preview" class="preview" hidden>
+          <div class="msg-head">
+            <div class="msg-head-top">
+              <h1 id="pv-subject" class="pv-subject"></h1>
+              <button id="delete-one" class="btn btn-ghost" type="button" title="Delete this message">Delete</button>
+            </div>
+            <dl class="pv-meta">
+              <div><dt>From</dt><dd id="pv-from"></dd></div>
+              <div><dt>To</dt><dd id="pv-to"></dd></div>
+              <div id="pv-cc-row" hidden><dt>Cc</dt><dd id="pv-cc"></dd></div>
+              <div><dt>Date</dt><dd id="pv-date"></dd></div>
+            </dl>
+          </div>
+
+          <nav class="tabs" id="tabs" role="tablist">
+            <button class="tab" data-tab="html" role="tab" type="button">HTML</button>
+            <button class="tab" data-tab="text" role="tab" type="button">Text</button>
+            <button class="tab" data-tab="raw" role="tab" type="button">Raw</button>
+            <button class="tab" data-tab="headers" role="tab" type="button">Headers</button>
+            <button class="tab" data-tab="attachments" role="tab" type="button">
+              Attachments <span id="att-count" class="badge" hidden></span>
+            </button>
+          </nav>
+
+          <div id="tab-body" class="tab-body" role="tabpanel"></div>
+        </article>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

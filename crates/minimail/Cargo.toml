@@ -1,0 +1,20 @@
+[package]
+name = "minimail"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "minimail"
+path = "src/main.rs"
+
+[features]
+default = []
+tls = ["dep:rustls", "dep:rustls-pemfile"]
+
+[dependencies]
+rustls = { version = "0.23", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true

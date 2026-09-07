@@ -1,0 +1,5 @@
+# minimail credentials: one USER = PASSWORD per line.
+# '#' starts a comment anywhere; both sides are trimmed.
+# A password containing '#' or leading/trailing spaces cannot be represented.
+alice = alicepass
+bob   = bobpass
