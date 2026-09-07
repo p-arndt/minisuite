@@ -10,6 +10,16 @@ pub struct Credentials {
     pub map: HashMap<String, String>,
 }
 
+/// Hand-written so that `#[derive(Debug)]` on `Config` can never print a
+/// secret: only the number of loaded credentials is shown.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("keys", &self.map.len())
+            .finish()
+    }
+}
+
 impl Credentials {
     pub fn new() -> Self {
         Self::default()

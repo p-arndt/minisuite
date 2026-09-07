@@ -1,7 +1,13 @@
 [package]
 name = "minimail"
-version = "0.1.0"
-edition = "2021"
+description = "A tiny, dependency-free dev SMTP sink with a web UI and JSON API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "minimail"
@@ -14,7 +20,3 @@ tls = ["dep:rustls", "dep:rustls-pemfile"]
 [dependencies]
 rustls = { version = "0.23", optional = true }
 rustls-pemfile = { version = "2", optional = true }
-
-[profile.release]
-opt-level = 3
-lto = true

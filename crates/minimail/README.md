@@ -5,9 +5,9 @@ A tiny, **dependency-free** development SMTP sink with a web UI and JSON API, wr
 No `tokio`, no `hyper`, no `serde`, no `lettre`, no crypto crate — just the standard library. It speaks SMTP on one port, accepts every message, and **never delivers onward**. Captured mail is retrieved through an embedded web UI and a JSON API on a second port. The whole thing is around 5k lines and compiles into a single static binary you can drop on any machine.
 
 ```
-$ cargo build --release
+$ cargo build --release -p minimail
 $ ./target/release/minimail
-minimail 0.1.0
+minimail 0.2.0
   SMTP  smtp://127.0.0.1:1025
   HTTP  http://127.0.0.1:8025
   root  ./mail
@@ -42,13 +42,18 @@ It is a **dev tool**. It binds to localhost by default, has no access control be
 
 ## Install
 
+minimail ships as one crate of the [minisuite](https://github.com/p-arndt/minisuite)
+Cargo workspace. Build it from the repository root:
+
 ```bash
-git clone https://github.com/p-arndt/minimail
-cd minimail
-cargo build --release
+git clone https://github.com/p-arndt/minisuite
+cd minisuite
+cargo build --release -p minimail
 ```
 
-The resulting `target/release/minimail` is self-contained.
+The resulting `target/release/minimail` is self-contained. (Plain `cargo build
+--release` builds every crate in the workspace, including the `minisuite`
+launcher that runs minimail, minicloak and minibucket in one process.)
 
 ### Docker
 
@@ -69,13 +74,14 @@ docker run --rm -p 1025:1025 -p 8025:8025 \
 ```
 
 The default `CMD` is `--smtp-bind 0.0.0.0:1025 --http-bind 0.0.0.0:8025 --root /data`.
-Override it to pass any of the options below — for example, a fixed credential:
+Override it — or, usually nicer in a container, set the matching `MINIMAIL_*`
+environment variables (see [Environment variables](#environment-variables)) —
+for example, a fixed credential:
 
 ```bash
 docker run --rm -p 1025:1025 -p 8025:8025 -v minimail-data:/data \
-  ghcr.io/p-arndt/minimail:latest \
-  --smtp-bind 0.0.0.0:1025 --http-bind 0.0.0.0:8025 --root /data \
-  --user dev --password dev
+  -e MINIMAIL_USER=dev -e MINIMAIL_PASSWORD=dev \
+  ghcr.io/p-arndt/minimail:latest
 ```
 
 Or with Docker Compose:
@@ -90,9 +96,11 @@ services:
     volumes:
       - minimail-data:/data
       - ./minimail.creds:/minimail.creds:ro
-    command: >
-      --smtp-bind 0.0.0.0:1025 --http-bind 0.0.0.0:8025 --root /data
-      --credentials /minimail.creds
+    environment:
+      MINIMAIL_SMTP_BIND: 0.0.0.0:1025
+      MINIMAIL_HTTP_BIND: 0.0.0.0:8025
+      MINIMAIL_ROOT: /data
+      MINIMAIL_CREDENTIALS: /minimail.creds
 
 volumes:
   minimail-data:
@@ -107,13 +115,14 @@ dev=devpassword
 ```
 
 Then `docker compose up` and point your app at `127.0.0.1:1025`. For a single
-throwaway credential you can skip the file and pass `--user dev --password dev`
-in `command:` instead; or `--anonymous` for no auth at all.
+throwaway credential you can skip the file and set `MINIMAIL_USER=dev` /
+`MINIMAIL_PASSWORD=dev` instead; or `MINIMAIL_ANONYMOUS=1` for no auth at all.
 
-To build the image yourself:
+To build the image yourself, from the repository root — the Dockerfile now
+lives there and builds any crate of the workspace:
 
 ```bash
-docker build -t minimail .
+docker build --target minimail -t minimail .
 ```
 
 ## Usage
@@ -137,6 +146,7 @@ Usage: minimail [options]
   --tls-key FILE           PEM private key (requires --features tls)
   --smtps-bind ADDR        implicit-TLS SMTP listener (requires --features tls)
   -h, --help               show this help and exit
+  -V, --version            show the version and exit
 ```
 
 With no `--anonymous` and no credentials given, minimail adds a default dev
@@ -145,6 +155,26 @@ SMTP AUTH and HTTP Basic on the API/UI. The `--tls-*` and `--smtps-bind` flags
 are listed above so you know the feature exists, but on the **default build**
 they error at parse time — you need a `--features tls` build to use them (see
 [TLS](#tls)).
+
+### Environment variables
+
+Every flag has an environment variable twin: `MINIMAIL_` followed by the flag
+name in upper case with dashes turned into underscores. So `--smtp-bind` is
+`MINIMAIL_SMTP_BIND`, `--http-bind` is `MINIMAIL_HTTP_BIND`, `--root` is
+`MINIMAIL_ROOT`, `--credentials` is `MINIMAIL_CREDENTIALS`, `--user` /
+`--password` are `MINIMAIL_USER` / `MINIMAIL_PASSWORD`, `--max-messages` is
+`MINIMAIL_MAX_MESSAGES`, and so on.
+
+Boolean flags (`--anonymous`) accept `1`, `true`, `yes` or `on` to enable and
+`0`, `false`, `no` or `off` to disable, case-insensitively.
+
+Precedence is **command-line flag > environment variable > default**, so an
+env-var baseline in a compose file or `.env` can always be overridden ad hoc:
+
+```bash
+MINIMAIL_HTTP_BIND=0.0.0.0:8025 MINIMAIL_ANONYMOUS=1 minimail
+MINIMAIL_HTTP_BIND=0.0.0.0:8025 minimail --http-bind 127.0.0.1:9000   # 9000 wins
+```
 
 ### Examples
 
@@ -210,6 +240,31 @@ returns `ok`.
 **Open the UI** at <http://127.0.0.1:8025> to browse, search, and read mail (with
 live updates) in a browser.
 
+## Use as a library
+
+The binary is a ~25-line wrapper; everything lives in the library, so you can
+embed minimail in your own process — this is how the `minisuite` launcher runs
+it in a thread next to minicloak and minibucket:
+
+```rust
+// Parse argv + the MINIMAIL_* environment, or build a Config by hand.
+let cfg = minimail::parse_args(std::env::args().skip(1))?;
+// let cfg = minimail::Config { anonymous: true, ..Default::default() };
+
+// Everything that can fail happens here: bind the sockets, open the spool,
+// load TLS material. The library never calls process::exit.
+let ready = minimail::prepare(cfg)?;
+eprint!("{}", ready.banner());
+
+// Blocks forever. Prepared is Send, so this can be a spawned thread.
+ready.serve()?;
+```
+
+`parse_args` takes the arguments *without* argv[0] and returns
+`Result<Config, CliError>`; a `CliError` with `code == 0` is `--help` /
+`--version` output (print it and exit 0), anything else is a usage error
+(exit 2).
+
 ## On-disk layout
 
 Every message is two plain files under `--root`:
@@ -233,7 +288,8 @@ truth. Message ids are time-sortable, so a plain directory sort is chronological
 
 ```
 src/
-  main.rs      # CLI, Config, accept loops, startup banner
+  lib.rs       # public API: Config/parse_args/prepare/Prepared, accept loops
+  main.rs      # ~25-line binary wrapper around the library
   server.rs    # shared Server state
   smtp.rs      # SMTP session state machine + serve() driver
   api.rs       # HTTP JSON API + UI + SSE dispatch
@@ -264,7 +320,7 @@ TLS is **off by default** and the default build has zero dependencies. Build wit
 the feature to get STARTTLS and implicit SMTPS:
 
 ```bash
-cargo build --release --features tls
+cargo build --release -p minimail --features tls
 minimail --tls-cert cert.pem --tls-key key.pem       # advertises STARTTLS
 minimail --tls-cert cert.pem --tls-key key.pem \
          --smtps-bind 127.0.0.1:465                   # + implicit SMTPS listener
