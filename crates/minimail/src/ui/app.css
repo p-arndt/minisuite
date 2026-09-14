@@ -48,6 +48,10 @@
 
 * { box-sizing: border-box; }
 
+/* The UI toggles visibility via the `hidden` attribute, but the class rules below
+   set `display` and would otherwise win over the user-agent `[hidden]` rule. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
