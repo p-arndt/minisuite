@@ -56,7 +56,7 @@ The image is built from `scratch`, contains nothing but the static binary, runs 
 docker compose up -d
 ```
 
-[`compose.yml`](compose.yml) runs the three single-service images with named volumes. Every option is an environment variable, so tweaking credentials or ports is a one-line edit:
+[`compose.yml`](compose.yml) runs the three single-service images with named volumes. Host ports are published on `127.0.0.1` only; drop the prefix in the `ports:` entry to expose a service to the LAN (and replace its default credentials first). Every option is an environment variable, so tweaking credentials or ports is a one-line edit:
 
 ```yaml
     environment:

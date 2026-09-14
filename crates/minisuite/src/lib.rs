@@ -428,6 +428,39 @@ impl Ready {
     }
 }
 
+/// True when `addr` (a `host:port` bind string) only listens on this machine:
+/// 127.0.0.0/8, `::1` or `localhost`. Anything else — including `0.0.0.0` and
+/// `[::]` — is reachable from the network.
+pub fn is_loopback_bind(addr: &str) -> bool {
+    let host = if let Some(rest) = addr.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else if addr.matches(':').count() <= 1 {
+        addr.split(':').next().unwrap_or("")
+    } else {
+        addr
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Suite-level warning for `--bind-all`: every service is now reachable from
+/// the network while (unless overridden) still running with its dev defaults.
+/// Each service also warns on its own; this one lists the whole picture.
+const BIND_ALL_WARNING: &str = "\
+WARNING: --bind-all: every service and the landing page listen on 0.0.0.0 and are
+  reachable from other hosts. Unless you configured otherwise they still use the
+  dev defaults:
+  - minicloak: users alice/alice, bob/bob, client myapp/s3cret, and quick-login
+    (password-less sign-in). MINICLOAK_USER / MINICLOAK_CLIENT / MINICLOAK_NO_QUICK_LOGIN=1
+  - minimail:  minimail/minimail for SMTP AUTH and the web UI. MINIMAIL_USER / MINIMAIL_PASSWORD
+  - minibucket: access key minioadmin, secret minioadmin. MINIBUCKET_ACCESS_KEY / MINIBUCKET_SECRET_KEY
+  Drop --bind-all (or set MINISUITE_BIND_ALL=0) unless every host on this network is trusted.
+";
+
 /// The port of a `host:port` bind string. Falls back to 0, which only shows up
 /// in a link if a bind string was malformed — and in that case the bind itself
 /// has already failed.
@@ -500,6 +533,9 @@ pub fn run(cfg: Config) -> Result<(), CliError> {
     };
 
     eprint!("{}", banner(&cfg, &running));
+    if cfg.bind_all {
+        eprint!("\n{}", BIND_ALL_WARNING);
+    }
 
     let entries: Vec<Entry> = running
         .iter()
@@ -663,6 +699,42 @@ mod tests {
 
     fn no_env(_: &str) -> bool {
         false
+    }
+
+    #[test]
+    fn loopback_binds_are_recognised() {
+        for a in [
+            "127.0.0.1:9900",
+            "127.1.2.3:1",
+            "[::1]:9900",
+            "::1",
+            "localhost:9900",
+            "LOCALHOST:1",
+        ] {
+            assert!(is_loopback_bind(a), "{}", a);
+        }
+        for a in [
+            "0.0.0.0:9900",
+            "[::]:9900",
+            "192.168.1.10:9900",
+            "example.com:1",
+            "",
+        ] {
+            assert!(!is_loopback_bind(a), "{}", a);
+        }
+    }
+
+    #[test]
+    fn bind_all_warning_names_every_dev_default() {
+        for needle in [
+            "0.0.0.0",
+            "alice/alice",
+            "minimail/minimail",
+            "minioadmin",
+            "MINICLOAK_NO_QUICK_LOGIN",
+        ] {
+            assert!(BIND_ALL_WARNING.contains(needle), "{}", needle);
+        }
     }
 
     #[test]

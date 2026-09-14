@@ -448,10 +448,56 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
+/// True when `addr` (a `host:port` bind string) only listens on this machine:
+/// 127.0.0.0/8, `::1` or `localhost`. Anything else — including `0.0.0.0` and
+/// `[::]` — is reachable from the network.
+pub fn is_loopback_bind(addr: &str) -> bool {
+    let host = if let Some(rest) = addr.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else if addr.matches(':').count() <= 1 {
+        addr.split(':').next().unwrap_or("")
+    } else {
+        addr
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// The lines appended to the banner when the server is reachable from the
+/// network while still running with dev-only settings. Empty when there is
+/// nothing to warn about.
+fn exposure_warning(bind: &str, default_creds: bool, quick_login: bool) -> String {
+    if is_loopback_bind(bind) || !(default_creds || quick_login) {
+        return String::new();
+    }
+    let mut w = format!(
+        "\nWARNING: {} is bound to {} and reachable from other hosts, but:\n",
+        NAME, bind
+    );
+    if default_creds {
+        w.push_str(
+            "  - the built-in dev users (alice/alice, bob/bob) and client myapp/s3cret are active;\n    \
+             set --user / --client (MINICLOAK_USER / MINICLOAK_CLIENT) or --config to replace them\n",
+        );
+    }
+    if quick_login {
+        w.push_str(
+            "  - quick-login lets anyone sign in as any user without a password;\n    \
+             pass --no-quick-login (MINICLOAK_NO_QUICK_LOGIN=1) to disable it\n",
+        );
+    }
+    w.push_str("  Bind to 127.0.0.1 (--bind / MINICLOAK_BIND) unless every host on this network is trusted.\n");
+    w
+}
+
 /// Resolve the config file and the inline specs into the final registries.
-/// The file is read first so that an inline `--user`/`--client` with the same
-/// name overrides it, which is the whole point of the terse spec.
-fn resolve(cfg: &Config) -> io::Result<(Users, Clients)> {
+/// The third value is true when the built-in dev users or clients were seeded
+/// because nothing was configured.
+fn resolve(cfg: &Config) -> io::Result<(Users, Clients, bool)> {
     let mut users = Users::new();
     let mut clients = Clients::new();
 
@@ -479,7 +525,9 @@ fn resolve(cfg: &Config) -> io::Result<(Users, Clients)> {
         }
     }
 
+    let mut seeded = false;
     if users.is_empty() {
+        seeded = true;
         users.add(User {
             username: "alice".into(),
             password: "alice".into(),
@@ -498,6 +546,7 @@ fn resolve(cfg: &Config) -> io::Result<(Users, Clients)> {
         });
     }
     if clients.is_empty() {
+        seeded = true;
         clients.add(Client {
             id: "myapp".into(),
             secret: Some("s3cret".into()),
@@ -509,7 +558,7 @@ fn resolve(cfg: &Config) -> io::Result<(Users, Clients)> {
             redirect_uris: vec!["http://localhost:5173/*".into()],
         });
     }
-    Ok((users, clients))
+    Ok((users, clients, seeded))
 }
 
 /// Load the signing key from `path`, generating and persisting it on first run.
@@ -551,7 +600,7 @@ fn load_or_generate_key(path: Option<&PathBuf>, bits: usize) -> io::Result<(RsaK
 /// Do all the fallible startup work: bind the socket, read the config file,
 /// load or generate the RSA key, validate `--auto-login`.
 pub fn prepare(cfg: Config) -> io::Result<Prepared> {
-    let (users, clients) = resolve(&cfg)?;
+    let (users, clients, default_creds) = resolve(&cfg)?;
 
     if let Some(name) = &cfg.auto_login {
         if users.get(name).is_none() {
@@ -624,6 +673,11 @@ pub fn prepare(cfg: Config) -> io::Result<Prepared> {
         );
     }
     banner.push_str("  This is a development tool. Do not run it in production.\n");
+    banner.push_str(&exposure_warning(
+        &cfg.bind,
+        default_creds,
+        cfg.auto_login.is_none() && cfg.quick_login,
+    ));
 
     let server = Arc::new(Server {
         realm: cfg.realm,
@@ -777,5 +831,58 @@ mod lib_tests {
     fn prepared_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<Prepared>();
+    }
+
+    #[test]
+    fn loopback_binds_are_recognised() {
+        for a in [
+            "127.0.0.1:9500",
+            "127.1.2.3:1",
+            "[::1]:9500",
+            "::1",
+            "localhost:9500",
+            "LOCALHOST:1",
+        ] {
+            assert!(is_loopback_bind(a), "{}", a);
+        }
+        for a in [
+            "0.0.0.0:9500",
+            "[::]:9500",
+            "192.168.1.10:9500",
+            "example.com:1",
+            "",
+        ] {
+            assert!(!is_loopback_bind(a), "{}", a);
+        }
+    }
+
+    #[test]
+    fn exposure_warning_only_when_exposed_with_dev_settings() {
+        assert_eq!(exposure_warning("127.0.0.1:9500", true, true), "");
+        assert_eq!(exposure_warning("0.0.0.0:9500", false, false), "");
+        let w = exposure_warning("0.0.0.0:9500", true, true);
+        assert!(w.contains("WARNING"));
+        assert!(w.contains("alice/alice") && w.contains("MINICLOAK_USER"));
+        assert!(w.contains("--no-quick-login"));
+        let w = exposure_warning("0.0.0.0:9500", false, true);
+        assert!(!w.contains("alice") && w.contains("quick-login"));
+    }
+
+    #[test]
+    fn banner_warns_when_bound_beyond_loopback_with_defaults() {
+        let cfg = Config {
+            bind: "0.0.0.0:0".into(),
+            key_bits: 512,
+            ..Config::default()
+        };
+        let p = prepare(cfg).unwrap();
+        assert!(p.banner().contains("WARNING"));
+
+        let cfg = Config {
+            bind: "127.0.0.1:0".into(),
+            key_bits: 512,
+            ..Config::default()
+        };
+        assert!(!prepare(cfg).unwrap().banner().contains("WARNING"));
     }
 }

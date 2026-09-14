@@ -85,21 +85,25 @@ docker target="minisuite":
 # Build all four images.
 docker-all: (docker "minicloak") (docker "minimail") (docker "minibucket") (docker "minisuite")
 
+# The docker-run-* recipes publish ports on 127.0.0.1 only: the images ship
+# with trivial dev credentials. To reach a service from other hosts drop the
+# `127.0.0.1:` prefix (`-p 9500:9500`) and set your own credentials via -e.
+
 # Run the all-in-one image: OIDC 9500, S3 9000, SMTP 1025, mail UI 8025, landing 9900.
 docker-run-minisuite:
-    docker run --rm -p 9500:9500 -p 9000:9000 -p 1025:1025 -p 8025:8025 -p 9900:9900 -v minisuite-data:/data minisuite:dev
+    docker run --rm -p 127.0.0.1:9500:9500 -p 127.0.0.1:9000:9000 -p 127.0.0.1:1025:1025 -p 127.0.0.1:8025:8025 -p 127.0.0.1:9900:9900 -v minisuite-data:/data minisuite:dev
 
 # Run just the OIDC provider.
 docker-run-minicloak:
-    docker run --rm -p 9500:9500 -v minicloak-data:/data minicloak:dev
+    docker run --rm -p 127.0.0.1:9500:9500 -v minicloak-data:/data minicloak:dev
 
 # Run just the SMTP sink + web UI.
 docker-run-minimail:
-    docker run --rm -p 1025:1025 -p 8025:8025 -v minimail-data:/data minimail:dev
+    docker run --rm -p 127.0.0.1:1025:1025 -p 127.0.0.1:8025:8025 -v minimail-data:/data minimail:dev
 
 # Run just the S3 server.
 docker-run-minibucket:
-    docker run --rm -p 9000:9000 -v minibucket-data:/data minibucket:dev
+    docker run --rm -p 127.0.0.1:9000:9000 -v minibucket-data:/data minibucket:dev
 
 # Run a locally built image with the right port mapping:  just docker-run minimail
 docker-run target="minisuite":

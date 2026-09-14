@@ -407,6 +407,61 @@ fn ensure_default_credential(cfg: &mut Config) {
     }
 }
 
+/// True when the only credential in effect is the seeded `minimail/minimail`.
+fn uses_default_credential(cfg: &Config) -> bool {
+    !cfg.anonymous
+        && cfg.creds.map.len() == 1
+        && cfg.creds.secret_for("minimail") == Some("minimail")
+}
+
+/// True when `addr` (a `host:port` bind string) only listens on this machine:
+/// 127.0.0.0/8, `::1` or `localhost`. Anything else — including `0.0.0.0` and
+/// `[::]` — is reachable from the network.
+pub fn is_loopback_bind(addr: &str) -> bool {
+    let host = if let Some(rest) = addr.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else if addr.matches(':').count() <= 1 {
+        addr.split(':').next().unwrap_or("")
+    } else {
+        addr
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// The lines appended to the banner when a listener is reachable from the
+/// network while the seeded dev credential is still in use. Empty otherwise.
+fn exposure_warning(cfg: &Config) -> String {
+    #[cfg(feature = "tls")]
+    let smtps = cfg.smtps_bind.as_deref();
+    #[cfg(not(feature = "tls"))]
+    let smtps: Option<&str> = None;
+    let exposed: Vec<&str> = [
+        Some(cfg.smtp_bind.as_str()),
+        Some(cfg.http_bind.as_str()),
+        smtps,
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|b| !is_loopback_bind(b))
+    .collect();
+    if exposed.is_empty() || !uses_default_credential(cfg) {
+        return String::new();
+    }
+    format!(
+        "\nWARNING: {} is bound to {} and reachable from other hosts, but:\n  \
+         - the built-in dev credential minimail/minimail is active for SMTP AUTH and the web UI;\n    \
+         set --user / --password (MINIMAIL_USER / MINIMAIL_PASSWORD) or --credentials to replace it\n  \
+         Bind to 127.0.0.1 (--smtp-bind / --http-bind) unless every host on this network is trusted.\n",
+        NAME,
+        exposed.join(", ")
+    )
+}
+
 // No std hostname API; probe env then /etc/hostname, else the crate name.
 fn system_hostname() -> String {
     for var in ["HOSTNAME", "COMPUTERNAME"] {
@@ -564,6 +619,7 @@ fn banner(cfg: &Config) -> String {
             let _ = writeln!(s, "  tls  enabled (STARTTLS)");
         }
     }
+    s.push_str(&exposure_warning(cfg));
     s
 }
 
@@ -632,6 +688,54 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<Prepared>();
         assert_send::<Config>();
+    }
+
+    #[test]
+    fn loopback_binds_are_recognised() {
+        for a in [
+            "127.0.0.1:1025",
+            "127.1.2.3:1",
+            "[::1]:8025",
+            "::1",
+            "localhost:1025",
+            "LOCALHOST:1",
+        ] {
+            assert!(is_loopback_bind(a), "{}", a);
+        }
+        for a in [
+            "0.0.0.0:1025",
+            "[::]:8025",
+            "192.168.1.10:1025",
+            "example.com:1",
+            "",
+        ] {
+            assert!(!is_loopback_bind(a), "{}", a);
+        }
+    }
+
+    #[test]
+    fn banner_warns_when_exposed_with_the_default_credential() {
+        let cfg = parse_args(args(&[])).unwrap();
+        assert!(!banner(&cfg).contains("WARNING"));
+
+        let cfg = parse_args(args(&["--http-bind", "0.0.0.0:8025"])).unwrap();
+        let b = banner(&cfg);
+        assert!(b.contains("WARNING") && b.contains("0.0.0.0:8025"), "{}", b);
+        assert!(b.contains("minimail/minimail") && b.contains("MINIMAIL_USER"));
+
+        // Own credential or anonymous: nothing to warn about.
+        let cfg = parse_args(args(&[
+            "--http-bind",
+            "0.0.0.0:8025",
+            "--user",
+            "a",
+            "--password",
+            "b",
+        ]))
+        .unwrap();
+        assert!(!banner(&cfg).contains("WARNING"));
+        let cfg = parse_args(args(&["--http-bind", "0.0.0.0:8025", "--anonymous"])).unwrap();
+        assert!(!banner(&cfg).contains("WARNING"));
     }
 
     #[test]

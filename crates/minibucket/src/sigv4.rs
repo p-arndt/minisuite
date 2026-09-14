@@ -1,11 +1,25 @@
 // AWS SigV4 verification (HTTP header style). Sufficient for AWS SDKs
 // talking to S3, including STREAMING-AWS4-HMAC-SHA256-PAYLOAD requests
-// (we verify the seed signature only — chunk signatures are accepted).
+// (seed signature verified here, per-chunk signatures via ChunkContext).
+//
+// Besides the signature itself this module also enforces the two things a
+// valid signature does not cover on its own:
+//   * the request time (x-amz-date) must be within MAX_CLOCK_SKEW_SECS of
+//     the server clock, so a captured request cannot be replayed later;
+//   * when x-amz-content-sha256 carries a real digest, the body that actually
+//     arrives must hash to it (PayloadHashReader), so a captured signature
+//     cannot be reused with a different body.
+
+use std::io::{self, BufRead, Read};
 
 use crate::hmac::hmac_sha256;
 use crate::http::Headers;
-use crate::sha256::{hex, sha256};
+use crate::sha256::{hex, sha256, Sha256};
 use crate::url::{encode_component, encode_path_sigv4, parse_query};
+
+// Maximum accepted difference between x-amz-date and the server clock, in
+// either direction. Same window S3 uses.
+pub const MAX_CLOCK_SKEW_SECS: u64 = 15 * 60;
 
 #[derive(Debug)]
 pub struct AuthInfo {
@@ -24,6 +38,20 @@ pub enum AuthError {
     Missing,
     Malformed,
     BadSignature,
+    // x-amz-date is absent or not "YYYYMMDDTHHMMSSZ".
+    BadDate,
+    // x-amz-date is further than MAX_CLOCK_SKEW_SECS from the server clock.
+    RequestTimeTooSkewed,
+}
+
+// Clock-skew check for header-authenticated requests. `now` is seconds since
+// the Unix epoch (passed in so tests can pin it).
+pub fn check_request_time(amz_date: &str, now: u64) -> Result<(), AuthError> {
+    let signed_at = crate::util::parse_amz_date(amz_date).ok_or(AuthError::BadDate)?;
+    if signed_at.abs_diff(now) > MAX_CLOCK_SKEW_SECS {
+        return Err(AuthError::RequestTimeTooSkewed);
+    }
+    Ok(())
 }
 
 pub fn parse_authorization(headers: &Headers) -> Result<AuthInfo, AuthError> {
@@ -197,8 +225,11 @@ pub fn verify(
     if constant_time_eq(sig.as_bytes(), info.signature.as_bytes()) {
         Ok(())
     } else {
-        eprintln!("[sigv4] mismatch\n--- canonical ---\n{}\n--- sts ---\n{}\n--- expected ---\n{}\n--- got ---\n{}",
-            canon, sts, sig, info.signature);
+        // Deliberately no canonical request / signature values in the log.
+        eprintln!(
+            "[sigv4] signature mismatch for access key {} ({} {})",
+            info.access_key, method, raw_path
+        );
         Err(AuthError::BadSignature)
     }
 }
@@ -309,8 +340,11 @@ pub fn verify_presigned(
     if constant_time_eq(sig.as_bytes(), info.signature.as_bytes()) {
         Ok(())
     } else {
-        eprintln!("[sigv4-presign] mismatch\n--- canonical ---\n{}\n--- sts ---\n{}\n--- expected ---\n{}\n--- got ---\n{}",
-            canon, sts, sig, info.signature);
+        // Deliberately no canonical request / signature values in the log.
+        eprintln!(
+            "[sigv4-presign] signature mismatch for access key {} ({} {})",
+            info.access_key, method, raw_path
+        );
         Err(AuthError::BadSignature)
     }
 }
@@ -359,12 +393,190 @@ impl ChunkContext {
             self.prev_signature = expected;
             Ok(())
         } else {
-            eprintln!(
-                "[sigv4-chunk] mismatch\n  expected: {}\n  got:      {}",
-                expected, got
-            );
+            eprintln!("[sigv4-chunk] chunk signature mismatch");
             Err(AuthError::BadSignature)
         }
+    }
+}
+
+// ---- Body hash verification (x-amz-content-sha256) ----
+
+// True if `s` is a lowercase/uppercase hex SHA-256 digest (as opposed to one
+// of the UNSIGNED-PAYLOAD / STREAMING-* markers).
+pub fn is_hex_digest(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+// io::Error payload: the body hashed to something other than the declared
+// x-amz-content-sha256. Surfaced to clients as 400 XAmzContentSHA256Mismatch.
+#[derive(Debug)]
+pub struct ContentSha256Mismatch;
+
+impl std::fmt::Display for ContentSha256Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("body does not match x-amz-content-sha256")
+    }
+}
+impl std::error::Error for ContentSha256Mismatch {}
+
+// io::Error payload: the connection ended before Content-Length bytes of a
+// hash-verified body arrived. Surfaced as 400 IncompleteBody.
+#[derive(Debug)]
+pub struct IncompleteBody;
+
+impl std::fmt::Display for IncompleteBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("body ended before Content-Length bytes")
+    }
+}
+impl std::error::Error for IncompleteBody {}
+
+pub fn is_content_sha256_mismatch(e: &io::Error) -> bool {
+    e.get_ref()
+        .map(|inner| inner.is::<ContentSha256Mismatch>())
+        .unwrap_or(false)
+}
+
+pub fn is_incomplete_body(e: &io::Error) -> bool {
+    e.get_ref()
+        .map(|inner| inner.is::<IncompleteBody>())
+        .unwrap_or(false)
+}
+
+struct PayloadCheck {
+    hasher: Sha256,
+    expected: String,
+    remaining: u64,
+}
+
+// BufRead adapter that sits between the socket and the S3 handlers. In
+// pass-through mode it is transparent. In verifying mode it hashes the first
+// `content_length` bytes that flow through it and, once the last of them has
+// been handed out, compares the digest with the declared one: on mismatch the
+// read that would have delivered the final bytes fails with
+// ContentSha256Mismatch instead. Handlers propagate that error before they
+// finalize anything (the PUT-object writer aborts, so its temp file is never
+// renamed into place). Whatever the handler does, no code path sees a
+// complete body that did not hash correctly.
+//
+// Only fixed-length bodies are verified this way; aws-chunked bodies carry
+// per-chunk signatures (ChunkContext) instead.
+pub struct PayloadHashReader<R> {
+    inner: R,
+    check: Option<PayloadCheck>,
+    // Errors detected inside `consume` (which cannot fail) are surfaced on the
+    // next read / fill_buf.
+    pending: Option<io::Error>,
+}
+
+impl<R: BufRead> PayloadHashReader<R> {
+    // Pass-through: nothing is checked.
+    pub fn passthrough(inner: R) -> Self {
+        Self {
+            inner,
+            check: None,
+            pending: None,
+        }
+    }
+
+    // Verify that the next `content_length` bytes hash to `expected_hex`. A
+    // zero-length body is checked right here, since no read will ever happen.
+    pub fn verifying(inner: R, expected_hex: &str, content_length: u64) -> io::Result<Self> {
+        let mut r = Self {
+            inner,
+            check: Some(PayloadCheck {
+                hasher: Sha256::new(),
+                expected: expected_hex.to_ascii_lowercase(),
+                remaining: content_length,
+            }),
+            pending: None,
+        };
+        if content_length == 0 {
+            r.observe(&[])?;
+        }
+        Ok(r)
+    }
+
+    fn finish(check: PayloadCheck) -> io::Result<()> {
+        let got = hex(&check.hasher.finalize());
+        if constant_time_eq(got.as_bytes(), check.expected.as_bytes()) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                ContentSha256Mismatch,
+            ))
+        }
+    }
+
+    // Feed bytes that were handed to the caller. Bytes past `remaining` belong
+    // to something else (a pipelined request) and are not part of the body.
+    fn observe(&mut self, data: &[u8]) -> io::Result<()> {
+        let Some(check) = self.check.as_mut() else {
+            return Ok(());
+        };
+        let n = (data.len() as u64).min(check.remaining) as usize;
+        check.hasher.update(&data[..n]);
+        check.remaining -= n as u64;
+        if check.remaining == 0 {
+            let check = self.check.take().expect("check present");
+            Self::finish(check)?;
+        }
+        Ok(())
+    }
+
+    fn take_pending(&mut self) -> io::Result<()> {
+        match self.pending.take() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn eof(&self) -> io::Result<()> {
+        if self.check.is_some() {
+            Err(io::Error::new(io::ErrorKind::UnexpectedEof, IncompleteBody))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<R: BufRead> Read for PayloadHashReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        self.take_pending()?;
+        let n = self.inner.read(out)?;
+        if n == 0 {
+            self.eof()?;
+            return Ok(0);
+        }
+        self.observe(&out[..n])?;
+        Ok(n)
+    }
+}
+
+impl<R: BufRead> BufRead for PayloadHashReader<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.take_pending()?;
+        let at_eof = self.inner.fill_buf()?.is_empty();
+        if at_eof {
+            self.eof()?;
+        }
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        if self.check.is_some() {
+            // The bytes being consumed are still in the inner buffer; hash
+            // them before they go away.
+            let observed: Vec<u8> = match self.inner.fill_buf() {
+                Ok(b) => b[..amt.min(b.len())].to_vec(),
+                Err(_) => Vec::new(),
+            };
+            if let Err(e) = self.observe(&observed) {
+                self.pending = Some(e);
+            }
+        }
+        self.inner.consume(amt);
     }
 }
 
@@ -626,5 +838,224 @@ mod tests {
         assert_eq!(ctx.prev_signature, exp);
         // A mismatched signature must fail.
         assert!(ctx.verify_and_advance(b"world", "00").is_err());
+    }
+
+    // "YYYYMMDDTHHMMSSZ" for a Unix timestamp (the inverse of parse_amz_date).
+    fn amz_date_at(secs: u64) -> String {
+        crate::util::iso8601(secs)
+            .replace(['-', ':'], "")
+            .replace(".000Z", "Z")
+    }
+
+    #[test]
+    fn request_time_within_window_is_accepted() {
+        let now = 1_700_000_000;
+        // One minute old, one minute ahead: both fine.
+        assert!(check_request_time(&amz_date_at(now - 60), now).is_ok());
+        assert!(check_request_time(&amz_date_at(now + 60), now).is_ok());
+        // Exactly at the edge is still fine.
+        assert!(check_request_time(&amz_date_at(now - MAX_CLOCK_SKEW_SECS), now).is_ok());
+    }
+
+    #[test]
+    fn request_time_outside_window_is_rejected() {
+        let now = 1_700_000_000;
+        assert!(matches!(
+            check_request_time(&amz_date_at(now - 20 * 60), now),
+            Err(AuthError::RequestTimeTooSkewed)
+        ));
+        assert!(matches!(
+            check_request_time(&amz_date_at(now + 20 * 60), now),
+            Err(AuthError::RequestTimeTooSkewed)
+        ));
+    }
+
+    #[test]
+    fn request_time_requires_a_parsable_date() {
+        assert!(matches!(check_request_time("", 0), Err(AuthError::BadDate)));
+        assert!(matches!(
+            check_request_time("2024-01-01T00:00:00Z", 0),
+            Err(AuthError::BadDate)
+        ));
+    }
+
+    #[test]
+    fn is_hex_digest_only_matches_sha256_hex() {
+        assert!(is_hex_digest(&hex(&sha256(b""))));
+        assert!(is_hex_digest(&hex(&sha256(b"")).to_ascii_uppercase()));
+        assert!(!is_hex_digest("UNSIGNED-PAYLOAD"));
+        assert!(!is_hex_digest("STREAMING-AWS4-HMAC-SHA256-PAYLOAD"));
+        assert!(!is_hex_digest("abc"));
+        assert!(!is_hex_digest(&"g".repeat(64)));
+    }
+
+    fn read_all<R: BufRead>(r: &mut PayloadHashReader<R>, len: usize) -> io::Result<Vec<u8>> {
+        // Mirror how FixedReader drives the transport: bounded reads, never
+        // past Content-Length.
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4];
+        while out.len() < len {
+            let cap = buf.len().min(len - out.len());
+            let n = r.read(&mut buf[..cap])?;
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn payload_hash_reader_accepts_matching_body() {
+        let body = b"hello world";
+        let digest = hex(&sha256(body));
+        let inner = io::BufReader::new(io::Cursor::new(body.to_vec()));
+        let mut r = PayloadHashReader::verifying(inner, &digest, body.len() as u64).unwrap();
+        assert_eq!(read_all(&mut r, body.len()).unwrap(), body);
+        // Uppercase digests are accepted too.
+        let inner = io::BufReader::new(io::Cursor::new(body.to_vec()));
+        let mut r = PayloadHashReader::verifying(inner, &digest.to_ascii_uppercase(), 11).unwrap();
+        assert_eq!(read_all(&mut r, body.len()).unwrap(), body);
+    }
+
+    #[test]
+    fn payload_hash_reader_rejects_replayed_signature_with_other_body() {
+        // The digest was computed for one body, a different one arrives.
+        let digest = hex(&sha256(b"hello world"));
+        let body = b"hello w0rld";
+        let inner = io::BufReader::new(io::Cursor::new(body.to_vec()));
+        let mut r = PayloadHashReader::verifying(inner, &digest, body.len() as u64).unwrap();
+        let e = read_all(&mut r, body.len()).unwrap_err();
+        assert!(is_content_sha256_mismatch(&e));
+        assert!(!is_incomplete_body(&e));
+    }
+
+    #[test]
+    fn payload_hash_reader_checks_empty_body_up_front() {
+        let inner = io::BufReader::new(io::Cursor::new(Vec::new()));
+        assert!(PayloadHashReader::verifying(inner, &hex(&sha256(b"")), 0).is_ok());
+        let inner = io::BufReader::new(io::Cursor::new(Vec::new()));
+        let e = match PayloadHashReader::verifying(inner, &hex(&sha256(b"x")), 0) {
+            Ok(_) => panic!("empty body with wrong digest must be rejected"),
+            Err(e) => e,
+        };
+        assert!(is_content_sha256_mismatch(&e));
+    }
+
+    #[test]
+    fn payload_hash_reader_rejects_truncated_body() {
+        let body = b"hello world";
+        let digest = hex(&sha256(body));
+        // Declared 11 bytes, only 5 on the wire.
+        let inner = io::BufReader::new(io::Cursor::new(body[..5].to_vec()));
+        let mut r = PayloadHashReader::verifying(inner, &digest, body.len() as u64).unwrap();
+        let e = read_all(&mut r, body.len()).unwrap_err();
+        assert!(is_incomplete_body(&e));
+    }
+
+    #[test]
+    fn payload_hash_reader_passthrough_is_transparent() {
+        let inner = io::BufReader::new(io::Cursor::new(b"abc".to_vec()));
+        let mut r = PayloadHashReader::passthrough(inner);
+        let mut out = String::new();
+        r.read_to_string(&mut out).unwrap();
+        assert_eq!(out, "abc");
+        // EOF on a pass-through reader is just EOF.
+        assert_eq!(r.read(&mut [0u8; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn payload_hash_reader_hashes_via_bufread_consume() {
+        let body = b"line1\nline2\n";
+        let digest = hex(&sha256(body));
+        let inner = io::BufReader::new(io::Cursor::new(body.to_vec()));
+        let mut r = PayloadHashReader::verifying(inner, &digest, body.len() as u64).unwrap();
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        r.read_line(&mut line).unwrap();
+        assert_eq!(line, "line1\nline2\n");
+        // Wrong digest: consume() cannot fail, so the mismatch detected while
+        // consuming the last body byte surfaces on the following call.
+        let inner = io::BufReader::new(io::Cursor::new(body.to_vec()));
+        let mut r = PayloadHashReader::verifying(inner, &hex(&sha256(b"other")), 12).unwrap();
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        r.read_line(&mut line).unwrap();
+        let e = r.fill_buf().map(|_| ()).unwrap_err();
+        assert!(is_content_sha256_mismatch(&e));
+    }
+
+    // Build an aws-chunked body whose chunk signatures are valid for `ctx`.
+    fn signed_chunked_body(ctx: &ChunkContext, chunks: &[&[u8]]) -> Vec<u8> {
+        let mut prev = ctx.prev_signature.clone();
+        let mut out = Vec::new();
+        for data in chunks.iter().chain(std::iter::once(&&b""[..])) {
+            let tmp = ChunkContext {
+                signing_key: ctx.signing_key,
+                amz_date: ctx.amz_date.clone(),
+                scope: ctx.scope.clone(),
+                prev_signature: prev.clone(),
+                empty_hash: ctx.empty_hash.clone(),
+            };
+            let sig = tmp.expected_signature(data);
+            out.extend_from_slice(
+                format!("{:x};chunk-signature={}\r\n", data.len(), sig).as_bytes(),
+            );
+            out.extend_from_slice(data);
+            out.extend_from_slice(b"\r\n");
+            prev = sig;
+        }
+        out
+    }
+
+    fn streaming_info() -> AuthInfo {
+        AuthInfo {
+            access_key: "AKIA".into(),
+            date: "20240101".into(),
+            region: "us-east-1".into(),
+            service: "s3".into(),
+            signed_headers: vec!["host".into()],
+            signature: "seed".into(),
+            amz_date: "20240101T000000Z".into(),
+            payload_hash: "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".into(),
+        }
+    }
+
+    fn chunked_request(body: Vec<u8>) -> crate::http::Request<io::BufReader<io::Cursor<Vec<u8>>>> {
+        let mut headers = Headers::default();
+        headers.insert("Content-Encoding", "aws-chunked");
+        crate::http::Request {
+            method: "POST".into(),
+            raw_path: "/b".into(),
+            path: "/b".into(),
+            query_raw: "delete".into(),
+            headers,
+            reader: io::BufReader::new(io::Cursor::new(body)),
+            chunk_ctx: None,
+        }
+    }
+
+    // read_body_all (used by the POST routes) must pick up the chunk context
+    // carried on the request and verify every chunk signature.
+    #[test]
+    fn read_body_all_verifies_chunks_from_request_context() {
+        let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+        let info = streaming_info();
+        let body = signed_chunked_body(&ChunkContext::new(secret, &info), &[b"hello", b"world"]);
+
+        // Correct signatures: accepted, context consumed.
+        let mut req = chunked_request(body.clone());
+        req.chunk_ctx = Some(ChunkContext::new(secret, &info));
+        assert_eq!(crate::s3::read_body_all(&mut req).unwrap(), b"helloworld");
+        assert!(req.chunk_ctx.is_none());
+
+        // Same bytes but signed under a different seed: rejected.
+        let other = AuthInfo {
+            signature: "other-seed".into(),
+            ..streaming_info()
+        };
+        let mut req = chunked_request(body);
+        req.chunk_ctx = Some(ChunkContext::new(secret, &other));
+        assert!(crate::s3::read_body_all(&mut req).is_err());
     }
 }

@@ -13,6 +13,11 @@
 #
 # The credentials here are DEV DEFAULTS and are deliberately trivial. Do not
 # expose these containers to a network you do not trust.
+#
+# Host ports are published on 127.0.0.1 only, so the stack is reachable from
+# this machine but not from the LAN. To expose a service to other hosts drop
+# the `127.0.0.1:` prefix (e.g. `- "9500:9500"`) — and replace the default
+# credentials first.
 
 services:
   # --- OpenID Connect provider ------------------------------------------
@@ -21,13 +26,19 @@ services:
     container_name: minicloak
     restart: unless-stopped
     ports:
-      - "9500:9500"
+      - "127.0.0.1:9500:9500"
     environment:
       # Bind inside the container; the host mapping is the `ports:` entry above.
       MINICLOAK_BIND: "0.0.0.0:9500"
       # RSA signing key: kept in the volume so issued tokens stay verifiable
       # across restarts. Generated on first boot if the file does not exist.
       MINICLOAK_KEY: "/data/key.pem"
+      # Users and clients. Without these minicloak seeds alice/alice, bob/bob
+      # and the client myapp/s3cret. Several specs are separated by ';'.
+      # MINICLOAK_USER: "carol=carolpass:carol@example.com:Carol Quinn:admin;dave=davepass"
+      # MINICLOAK_CLIENT: "myapp=change-me:http://localhost:3000/*"
+      # Password-less sign-in buttons on the login page; disable when exposed.
+      # MINICLOAK_NO_QUICK_LOGIN: "1"
       # Optional: mount a minicloak.toml (users, clients, scopes) and point here.
       # MINICLOAK_CONFIG: "/data/minicloak.toml"
     volumes:
@@ -39,8 +50,8 @@ services:
     container_name: minimail
     restart: unless-stopped
     ports:
-      - "1025:1025"   # SMTP — point your app's mailer here
-      - "8025:8025"   # Web UI + JSON API — http://localhost:8025
+      - "127.0.0.1:1025:1025"   # SMTP — point your app's mailer here
+      - "127.0.0.1:8025:8025"   # Web UI + JSON API — http://localhost:8025
     environment:
       MINIMAIL_SMTP_BIND: "0.0.0.0:1025"
       MINIMAIL_HTTP_BIND: "0.0.0.0:8025"
@@ -59,7 +70,7 @@ services:
     container_name: minibucket
     restart: unless-stopped
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
     environment:
       MINIBUCKET_BIND: "0.0.0.0:9000"
       MINIBUCKET_ROOT: "/data"
@@ -84,11 +95,11 @@ services:
   #   container_name: minisuite
   #   restart: unless-stopped
   #   ports:
-  #     - "9500:9500"   # minicloak
-  #     - "9000:9000"   # minibucket
-  #     - "1025:1025"   # minimail SMTP
-  #     - "8025:8025"   # minimail web UI
-  #     - "9900:9900"   # landing page — http://localhost:9900
+  #     - "127.0.0.1:9500:9500"   # minicloak
+  #     - "127.0.0.1:9000:9000"   # minibucket
+  #     - "127.0.0.1:1025:1025"   # minimail SMTP
+  #     - "127.0.0.1:8025:8025"   # minimail web UI
+  #     - "127.0.0.1:9900:9900"   # landing page — http://localhost:9900
   #   environment:
   #     # The per-service env vars all apply inside the suite as well.
   #     MINIMAIL_USER: "minimail"

@@ -7,15 +7,19 @@ use std::path::PathBuf;
 
 use crate::http::{Request, Response};
 use crate::s3::{error_response, read_body_all, Server};
+use crate::storage::StorageError;
 use crate::util::xml_escape;
 
-fn tag_path(srv: &Server, bucket: &str, key: &str) -> PathBuf {
-    srv.storage
-        .root
-        .join("buckets")
-        .join(bucket)
-        .join("tags")
-        .join(format!("{}.tags", key))
+// Sidecar path for a key's tags. Goes through the storage choke point so a
+// traversal key can never escape `<bucket>/tags/`.
+fn tag_path(srv: &Server, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
+    srv.storage.check_object(bucket, key)?;
+    let tags_dir = srv.storage.root.join("buckets").join(bucket).join("tags");
+    let p = tags_dir.join(format!("{}.tags", key));
+    if !p.starts_with(&tags_dir) || p == tags_dir {
+        return Err(StorageError::InvalidName);
+    }
+    Ok(p)
 }
 
 pub fn build_get_object_tagging(
@@ -27,7 +31,10 @@ pub fn build_get_object_tagging(
     if !srv.storage.bucket_exists(bucket) {
         return crate::s3::build_error(404, "NoSuchBucket", "no such bucket", rid, bucket);
     }
-    let p = tag_path(srv, bucket, key);
+    let p = match tag_path(srv, bucket, key) {
+        Ok(p) => p,
+        Err(_) => return crate::s3::build_error(400, "InvalidArgument", "invalid key", rid, key),
+    };
     let mut tags: Vec<(String, String)> = Vec::new();
     if p.exists() {
         if let Ok(s) = fs::read_to_string(&p) {
@@ -94,7 +101,10 @@ pub fn put_object_tagging<R: std::io::BufRead>(
         idx = tag_end + 6;
     }
 
-    let p = tag_path(srv, bucket, key);
+    let p = match tag_path(srv, bucket, key) {
+        Ok(p) => p,
+        Err(_) => return error_response(sock, 400, "InvalidArgument", "invalid key", rid, key),
+    };
     if let Some(parent) = p.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -117,7 +127,10 @@ pub fn delete_object_tagging(
     if !srv.storage.bucket_exists(bucket) {
         return error_response(sock, 404, "NoSuchBucket", "no such bucket", rid, bucket);
     }
-    let p = tag_path(srv, bucket, key);
+    let p = match tag_path(srv, bucket, key) {
+        Ok(p) => p,
+        Err(_) => return error_response(sock, 400, "InvalidArgument", "invalid key", rid, key),
+    };
     let _ = fs::remove_file(&p);
     let resp = Response::new(204).header("x-amz-request-id", rid);
     resp.write_headers(sock, Some(0))?;
@@ -221,7 +234,7 @@ mod tests {
         let (srv, _g) = make_server("tag_present");
         srv.storage.create_bucket("buck").unwrap();
         // Write the sidecar directly — exercises only the read path.
-        let p = tag_path(&srv, "buck", "k");
+        let p = tag_path(&srv, "buck", "k").unwrap();
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         let mut f = fs::File::create(&p).unwrap();
         writeln!(f, "env=prod").unwrap();
@@ -232,5 +245,27 @@ mod tests {
         let body = String::from_utf8(r.body.into_bytes().unwrap()).unwrap();
         assert!(body.contains("<Key>env</Key><Value>prod</Value>"));
         assert!(body.contains("<Key>team</Key><Value>storage</Value>"));
+    }
+
+    #[test]
+    fn tag_path_rejects_traversal_keys() {
+        let (srv, _g) = make_server("tag_traversal");
+        srv.storage.create_bucket("buck").unwrap();
+        for key in ["/etc/passwd", "../x", "a/../b", "a//b", ""] {
+            assert!(tag_path(&srv, "buck", key).is_err(), "accepted {:?}", key);
+        }
+        assert!(tag_path(&srv, "../buck", "k").is_err());
+        let p = tag_path(&srv, "buck", "dir/k").unwrap();
+        assert!(p.starts_with(srv.storage.root.join("buckets").join("buck").join("tags")));
+    }
+
+    #[test]
+    fn build_get_object_tagging_400_for_traversal_key() {
+        let (srv, _g) = make_server("tag_bad_key");
+        srv.storage.create_bucket("buck").unwrap();
+        let r = build_get_object_tagging(&srv, "buck", "../../x", "rid");
+        assert_eq!(r.status, 400);
+        let body = String::from_utf8(r.body.into_bytes().unwrap()).unwrap();
+        assert!(body.contains("InvalidArgument"));
     }
 }

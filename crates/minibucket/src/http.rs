@@ -14,9 +14,13 @@ pub struct Request<R: BufRead = BufReader<TcpStream>> {
     pub query_raw: String, // a=1&b=2 (still encoded)
     pub headers: Headers,
     pub reader: R,
+    // Per-chunk signing context for aws-chunked (STREAMING-AWS4-HMAC-SHA256)
+    // bodies. Set by the auth layer, taken by whichever body reader consumes
+    // the request, so every route verifies chunk signatures.
+    pub chunk_ctx: Option<crate::sigv4::ChunkContext>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct Headers {
     // canonical lowercase name -> original-cased name + value
     pub map: HashMap<String, (String, String)>,
@@ -57,11 +61,27 @@ pub fn read_request(stream: TcpStream) -> io::Result<Request<BufReader<TcpStream
     };
     let path = crate::url::percent_decode_str(&raw_path);
 
+    let headers = read_headers(&mut reader)?;
+
+    Ok(Request {
+        method,
+        raw_path,
+        path,
+        query_raw,
+        headers,
+        reader,
+        chunk_ctx: None,
+    })
+}
+
+// Parse header lines up to and including the blank line. Generic over BufRead
+// so it can be unit-tested without a socket.
+fn read_headers<R: BufRead>(reader: &mut R) -> io::Result<Headers> {
     let mut headers = Headers::default();
     let mut total = 0usize;
     loop {
         let mut hl = String::new();
-        let nr = read_line_limited(&mut reader, &mut hl, MAX_LINE_BYTES)?;
+        let nr = read_line_limited(reader, &mut hl, MAX_LINE_BYTES)?;
         if nr == 0 {
             break;
         }
@@ -76,21 +96,27 @@ pub fn read_request(stream: TcpStream) -> io::Result<Request<BufReader<TcpStream
         if trimmed.is_empty() {
             break;
         }
+        // read_line_limited splits on LF only, so a bare CR in the middle of
+        // a line would survive into the value. Treat it as malformed rather
+        // than let it travel (e.g. into signature canonicalisation or a
+        // reflected response header).
+        if trimmed.contains('\r') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bare CR in header line",
+            ));
+        }
         if let Some(c) = trimmed.find(':') {
             let name = trimmed[..c].trim();
             let value = trimmed[c + 1..].trim();
+            if !is_header_token(name) {
+                // Empty or non-token field-name: ignore the line.
+                continue;
+            }
             headers.insert(name, value);
         }
     }
-
-    Ok(Request {
-        method,
-        raw_path,
-        path,
-        query_raw,
-        headers,
-        reader,
-    })
+    Ok(headers)
 }
 
 fn read_line_limited<R: BufRead>(r: &mut R, out: &mut String, limit: usize) -> io::Result<usize> {
@@ -231,6 +257,38 @@ impl<'a, R: BufRead> Read for FixedReader<'a, R> {
     }
 }
 
+// --- Header hygiene ---
+
+// True if `name` is a non-empty RFC 7230 token (tchar+). Used to reject
+// header names that could break line/field structure (space, colon, CR/LF...).
+pub fn is_header_token(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+// Response header values are sanitised at the sink: CR, LF and NUL are each
+// replaced with a single space so a query- or user-derived value (e.g.
+// versionId reflected as x-amz-version-id) can never terminate the header
+// line and inject further headers or a body. The header itself is kept so
+// that observable behaviour (which headers are present) does not change.
+pub fn sanitize_header_value(v: &str) -> String {
+    if v.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
+        v.chars()
+            .map(|c| {
+                if matches!(c, '\r' | '\n' | '\0') {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect()
+    } else {
+        v.to_string()
+    }
+}
+
 // --- Response writer ---
 
 pub struct Response {
@@ -248,8 +306,12 @@ impl Response {
             headers: Vec::new(),
         }
     }
+    // Header names that are not RFC 7230 tokens are dropped; values are
+    // sanitised (see sanitize_header_value).
     pub fn header(mut self, k: &str, v: &str) -> Self {
-        self.headers.push((k.to_string(), v.to_string()));
+        if is_header_token(k) {
+            self.headers.push((k.to_string(), sanitize_header_value(v)));
+        }
         self
     }
     pub fn write_headers<W: Write>(&self, w: &mut W, body_len: Option<u64>) -> io::Result<()> {
@@ -260,6 +322,12 @@ impl Response {
         let mut have_date = false;
         let mut have_server = false;
         for (k, v) in &self.headers {
+            // `headers` is a pub field, so re-check here: this is the only
+            // place bytes hit the wire and it must not trust the caller.
+            if !is_header_token(k) {
+                continue;
+            }
+            let v = sanitize_header_value(v);
             let lk = k.to_ascii_lowercase();
             if lk == "content-length" {
                 have_len = true;
@@ -347,8 +415,12 @@ impl BuiltResponse {
             body: Body::Empty,
         }
     }
+    // Header names that are not RFC 7230 tokens are dropped; values are
+    // sanitised (see sanitize_header_value).
     pub fn header(mut self, k: &str, v: &str) -> Self {
-        self.headers.push((k.to_string(), v.to_string()));
+        if is_header_token(k) {
+            self.headers.push((k.to_string(), sanitize_header_value(v)));
+        }
         self
     }
     #[allow(dead_code)] // public API for handlers that want to use Stream/Empty bodies directly
@@ -449,5 +521,105 @@ mod tests {
         h.insert("host", "other"); // same key, different case: should overwrite
         assert_eq!(h.get("host"), Some("other"));
         assert_eq!(h.order, vec!["host", "x-amz-date"]);
+    }
+
+    fn render(resp: BuiltResponse) -> String {
+        let mut out = Vec::new();
+        resp.write_to(&mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn response_header_value_crlf_cannot_inject_header() {
+        let out = render(BuiltResponse::new(204).header("x-amz-version-id", "1\r\nX-Injected: y"));
+        let lines: Vec<&str> = out.split("\r\n").collect();
+        let amz: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.to_ascii_lowercase().starts_with("x-amz-"))
+            .collect();
+        assert_eq!(amz.len(), 1, "exactly one x-amz- line: {out:?}");
+        assert_eq!(*amz[0], "x-amz-version-id: 1  X-Injected: y");
+        assert!(
+            !lines.iter().any(|l| l.starts_with("X-Injected")),
+            "injected header line must not appear: {out:?}"
+        );
+        assert!(!out.contains('\0'));
+    }
+
+    #[test]
+    fn response_header_value_nul_is_replaced() {
+        let out = render(BuiltResponse::new(200).header("ETag", "a\0b"));
+        assert!(out.contains("ETag: a b\r\n"));
+    }
+
+    #[test]
+    fn response_header_invalid_name_is_dropped() {
+        let out = render(
+            BuiltResponse::new(200)
+                .header("Bad Name", "v")
+                .header("Bad:Name", "v")
+                .header("", "v")
+                .header("Bad\r\nName", "v")
+                .header("X-Good", "v"),
+        );
+        assert!(!out.contains("Bad"), "{out:?}");
+        assert!(out.contains("X-Good: v\r\n"));
+    }
+
+    #[test]
+    fn write_headers_sanitises_direct_pushes_too() {
+        // `headers` is pub; a caller bypassing header() still cannot inject.
+        let resp = Response {
+            status: 200,
+            status_text: status_text(200),
+            headers: vec![
+                ("Evil Name".into(), "v".into()),
+                ("X-Ok".into(), "a\r\nX-Injected: y".into()),
+            ],
+        };
+        let mut out = Vec::new();
+        resp.write_headers(&mut out, Some(0)).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("Evil"));
+        assert!(out.contains("X-Ok: a  X-Injected: y\r\n"));
+        assert!(!out.contains("\r\nX-Injected"));
+    }
+
+    #[test]
+    fn response_normal_headers_unchanged() {
+        let out = render(
+            BuiltResponse::new(200)
+                .header("Content-Type", "text/plain")
+                .header("ETag", "\"abc\"")
+                .xml("<x/>".into()),
+        );
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(out.contains("Content-Type: text/plain\r\n"));
+        assert!(out.contains("ETag: \"abc\"\r\n"));
+        assert!(out.contains("Content-Length: 4\r\n"));
+        assert!(out.ends_with("\r\n\r\n<x/>"));
+    }
+
+    #[test]
+    fn request_parser_rejects_bare_cr_in_header_line() {
+        use std::io::Cursor;
+        let mut r = Cursor::new(&b"X-A: 1\rX-B: 2\r\n\r\n"[..]);
+        let err = read_headers(&mut r).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn request_parser_trims_values_and_skips_non_token_names() {
+        use std::io::Cursor;
+        let mut r = Cursor::new(&b"Host:   example  \r\nBad Name: x\r\n: y\r\nX-Amz-Date:\t20240101T000000Z\r\n\r\nbody"[..]);
+        let h = read_headers(&mut r).unwrap();
+        assert_eq!(h.get("host"), Some("example"));
+        assert_eq!(h.get("x-amz-date"), Some("20240101T000000Z"));
+        assert_eq!(h.order, vec!["host", "x-amz-date"]);
+        assert_eq!(h.map.len(), 2);
+        // Blank line consumed; body left in the reader.
+        let mut rest = String::new();
+        r.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "body");
     }
 }

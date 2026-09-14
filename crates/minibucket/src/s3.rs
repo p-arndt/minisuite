@@ -3,7 +3,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::http::{AwsChunkedReader, FixedReader, Headers, Request, Response};
-use crate::storage::{Storage, StorageError};
+use crate::storage::{valid_bucket, valid_key, Storage, StorageError};
 use crate::url::parse_query;
 use crate::util::{iso8601, request_id, xml_escape};
 
@@ -19,7 +19,6 @@ pub fn dispatch<R: std::io::BufRead>(
     srv: &Server,
     mut req: Request<R>,
     sock: &mut std::net::TcpStream,
-    chunk_ctx: Option<crate::sigv4::ChunkContext>,
 ) -> std::io::Result<()> {
     let method = req.method.clone();
     let path = req.path.clone();
@@ -63,7 +62,6 @@ pub fn dispatch<R: std::io::BufRead>(
                 &upload_id,
                 part_number.unwrap(),
                 &rid,
-                chunk_ctx,
             ),
             "POST" => crate::multipart::complete_multipart(
                 srv, &mut req, sock, &bucket, &key, &upload_id, &rid,
@@ -143,7 +141,7 @@ pub fn dispatch<R: std::io::BufRead>(
         "PUT" if req.headers.get("x-amz-copy-source").is_some() => {
             copy_object(srv, sock, &bucket, &key, &req.headers, &rid)
         }
-        "PUT" => put_object(srv, &mut req, sock, &bucket, &key, &rid, chunk_ctx),
+        "PUT" => put_object(srv, &mut req, sock, &bucket, &key, &rid),
         "GET" => get_object(
             srv,
             sock,
@@ -464,7 +462,6 @@ fn put_object<R: std::io::BufRead>(
     bucket: &str,
     key: &str,
     rid: &str,
-    chunk_ctx: Option<crate::sigv4::ChunkContext>,
 ) -> std::io::Result<()> {
     if key.is_empty() {
         return error_response(sock, 400, "InvalidRequest", "Empty key", rid, key);
@@ -522,9 +519,20 @@ fn put_object<R: std::io::BufRead>(
 
     let mut buf = vec![0u8; 64 * 1024];
     if streaming {
-        let mut r = AwsChunkedReader::new(&mut req.reader).with_chunk_ctx(chunk_ctx);
+        let ctx = req.chunk_ctx.take();
+        let mut r = AwsChunkedReader::new(&mut req.reader).with_chunk_ctx(ctx);
         loop {
-            let n = r.read(&mut buf)?;
+            // A read error here includes body verification failures
+            // (x-amz-content-sha256 / chunk-signature mismatch): abort so the
+            // temp file is never renamed into place, then let handle() map
+            // the error to the right S3 response.
+            let n = match r.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    writer.abort();
+                    return Err(e);
+                }
+            };
             if n == 0 {
                 break;
             }
@@ -551,7 +559,17 @@ fn put_object<R: std::io::BufRead>(
             remaining,
         };
         loop {
-            let n = r.read(&mut buf)?;
+            // A read error here includes body verification failures
+            // (x-amz-content-sha256 / chunk-signature mismatch): abort so the
+            // temp file is never renamed into place, then let handle() map
+            // the error to the right S3 response.
+            let n = match r.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    writer.abort();
+                    return Err(e);
+                }
+            };
             if n == 0 {
                 break;
             }
@@ -620,25 +638,28 @@ fn copy_object(
             )
         }
     };
-    let decoded = crate::url::percent_decode_str(source.trim_start_matches('/'));
-    let (src_bucket, src_key) = match decoded.find('/') {
-        Some(i) => (decoded[..i].to_string(), decoded[i + 1..].to_string()),
-        None => {
-            return error_response(
-                sock,
-                400,
-                "InvalidArgument",
-                "copy-source must be /bucket/key",
-                rid,
-                dst_key,
-            )
-        }
+    let (src_bucket, src_key) = match parse_copy_source(source) {
+        Ok(v) => v,
+        Err(msg) => return error_response(sock, 400, "InvalidArgument", msg, rid, dst_key),
     };
+    if !valid_key(dst_key) {
+        return error_response(sock, 400, "InvalidArgument", "invalid key", rid, dst_key);
+    }
 
     let (meta, mut src_file) = match srv.storage.get_object(&src_bucket, &src_key) {
         Ok(v) => v,
         Err(StorageError::NotFound) => {
             return error_response(sock, 404, "NoSuchKey", "source not found", rid, &src_key);
+        }
+        Err(StorageError::InvalidName) => {
+            return error_response(
+                sock,
+                400,
+                "InvalidArgument",
+                "invalid copy-source",
+                rid,
+                &src_key,
+            );
         }
         Err(e) => {
             return error_response(
@@ -663,6 +684,9 @@ fn copy_object(
                 rid,
                 dst_bucket,
             );
+        }
+        Err(StorageError::InvalidName) => {
+            return error_response(sock, 400, "InvalidArgument", "invalid key", rid, dst_key);
         }
         Err(e) => {
             return error_response(
@@ -706,6 +730,23 @@ fn copy_object(
     write_xml(sock, 200, &body, rid)
 }
 
+// Parses `x-amz-copy-source` (`/bucket/key` or `bucket/key`, percent-encoded)
+// and validates both parts so the source can never address outside the store.
+fn parse_copy_source(source: &str) -> Result<(String, String), &'static str> {
+    let decoded = crate::url::percent_decode_str(source.trim_start_matches('/'));
+    let (bucket, key) = match decoded.find('/') {
+        Some(i) => (decoded[..i].to_string(), decoded[i + 1..].to_string()),
+        None => return Err("copy-source must be /bucket/key"),
+    };
+    if !valid_bucket(&bucket) {
+        return Err("invalid copy-source bucket");
+    }
+    if !valid_key(&key) {
+        return Err("invalid copy-source key");
+    }
+    Ok((bucket, key))
+}
+
 // GET and HEAD share this; the argument list mirrors the request itself.
 #[allow(clippy::too_many_arguments)]
 fn get_object(
@@ -742,6 +783,9 @@ fn get_object(
                         key,
                     );
                 }
+                Err(StorageError::InvalidName) => {
+                    return error_response(sock, 400, "InvalidArgument", "invalid key", rid, key);
+                }
                 Err(e) => {
                     return error_response(
                         sock,
@@ -765,6 +809,9 @@ fn get_object(
                     rid,
                     key,
                 );
+            }
+            Err(StorageError::InvalidName) => {
+                return error_response(sock, 400, "InvalidArgument", "invalid key", rid, key);
             }
             Err(e) => {
                 return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, key);
@@ -856,6 +903,9 @@ fn delete_object(
             Err(StorageError::NotFound) => {
                 return error_response(sock, 404, "NoSuchBucket", "no such bucket", rid, bucket);
             }
+            Err(StorageError::InvalidName) => {
+                return error_response(sock, 400, "InvalidArgument", "invalid key", rid, key);
+            }
             Err(e) => {
                 return error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, key)
             }
@@ -879,6 +929,9 @@ fn delete_object(
             rid,
             bucket,
         ),
+        Err(StorageError::InvalidName) => {
+            error_response(sock, 400, "InvalidArgument", "invalid key", rid, key)
+        }
         Err(e) => error_response(sock, 500, "InternalError", &format!("{:?}", e), rid, key),
     }
 }
@@ -893,7 +946,13 @@ fn delete_objects<R: std::io::BufRead>(
     // Read body (small XML) -- supports fixed or aws-chunked. We pull each
     // <Object>...</Object> entry and parse its <Key> plus optional <VersionId>.
     let body = read_body_all(req)?;
-    let s = String::from_utf8_lossy(&body);
+    let items = parse_delete_objects(&String::from_utf8_lossy(&body));
+    let body_out = build_delete_result(srv, bucket, &items);
+    write_xml(sock, 200, &body_out, rid)
+}
+
+// Extracts (key, version-id) pairs from a DeleteObjects request body.
+fn parse_delete_objects(s: &str) -> Vec<(String, Option<String>)> {
     let mut items: Vec<(String, Option<String>)> = Vec::new();
     let mut idx = 0;
     while let Some(start) = s[idx..].find("<Object>") {
@@ -924,10 +983,23 @@ fn delete_objects<R: std::io::BufRead>(
         }
     }
 
+    items
+}
+
+// Deletes each item and renders the DeleteResult document. Keys are validated
+// before they reach storage; a rejected key becomes an <Error> entry.
+fn build_delete_result(srv: &Server, bucket: &str, items: &[(String, Option<String>)]) -> String {
     let mut body_out = String::new();
     body_out.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     body_out.push_str(r#"<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">"#);
-    for (k, vid) in &items {
+    for (k, vid) in items {
+        if !valid_key(k) {
+            body_out.push_str(&format!(
+                "<Error><Key>{}</Key><Code>InvalidArgument</Code><Message>invalid key</Message></Error>",
+                xml_escape(k)
+            ));
+            continue;
+        }
         let result = match vid {
             Some(v) => srv
                 .storage
@@ -969,7 +1041,7 @@ fn delete_objects<R: std::io::BufRead>(
         }
     }
     body_out.push_str("</DeleteResult>");
-    write_xml(sock, 200, &body_out, rid)
+    body_out
 }
 
 pub fn read_body_all<R: std::io::BufRead>(req: &mut Request<R>) -> std::io::Result<Vec<u8>> {
@@ -980,7 +1052,10 @@ pub fn read_body_all<R: std::io::BufRead>(req: &mut Request<R>) -> std::io::Resu
         .unwrap_or(false);
     let mut out = Vec::new();
     if is_chunked {
-        let mut r = AwsChunkedReader::new(&mut req.reader);
+        // The chunk-signing context travels on the request so aws-chunked
+        // bodies are verified on every route.
+        let ctx = req.chunk_ctx.take();
+        let mut r = AwsChunkedReader::new(&mut req.reader).with_chunk_ctx(ctx);
         r.read_to_end(&mut out)?;
     } else {
         let remaining = req
@@ -1194,9 +1269,106 @@ mod tests {
             query_raw: "delete".into(),
             headers,
             reader: BufReader::new(Cursor::new(payload.to_vec())),
+            chunk_ctx: None,
         };
         let got = read_body_all(&mut req).unwrap();
         assert_eq!(got, payload);
+    }
+
+    fn path_style_request(path: &str) -> Request<BufReader<Cursor<Vec<u8>>>> {
+        Request {
+            method: "GET".into(),
+            raw_path: path.into(),
+            path: path.into(),
+            query_raw: "".into(),
+            headers: Headers::default(),
+            reader: BufReader::new(Cursor::new(Vec::new())),
+            chunk_ctx: None,
+        }
+    }
+
+    #[test]
+    fn resolve_addressing_traversal_key_is_rejected_by_valid_key() {
+        let (srv, _g) = make_server("resolve_traversal");
+        // `/b//etc/passwd` yields the absolute key `/etc/passwd`; it must not
+        // survive validation anywhere downstream.
+        let req = path_style_request("/b//etc/passwd");
+        let (bucket, key) = resolve_addressing(&srv, &req, &req.path);
+        assert_eq!(bucket, "b");
+        assert_eq!(key, "/etc/passwd");
+        assert!(!valid_key(&key));
+        assert!(matches!(
+            srv.storage.get_object("buck", &key),
+            Err(StorageError::InvalidName)
+        ));
+
+        let req = path_style_request("/b/../../etc/passwd");
+        let (_, key) = resolve_addressing(&srv, &req, &req.path);
+        assert!(!valid_key(&key));
+
+        // Ordinary key is untouched.
+        let req = path_style_request("/b/dir/file.txt");
+        let (bucket, key) = resolve_addressing(&srv, &req, &req.path);
+        assert_eq!((bucket.as_str(), key.as_str()), ("b", "dir/file.txt"));
+        assert!(valid_key(&key));
+    }
+
+    #[test]
+    fn parse_copy_source_rejects_traversal() {
+        assert!(parse_copy_source("/src//etc/passwd").is_err());
+        assert!(parse_copy_source("/src/../../etc/passwd").is_err());
+        assert!(parse_copy_source("/src/%2e%2e/%2e%2e/etc/passwd").is_err());
+        assert!(parse_copy_source("/src/a//b").is_err());
+        assert!(parse_copy_source("/../src/k").is_err());
+        assert!(parse_copy_source("nokey").is_err());
+        assert_eq!(
+            parse_copy_source("/src/dir/file%20name.txt").unwrap(),
+            ("src".to_string(), "dir/file name.txt".to_string())
+        );
+        assert_eq!(
+            parse_copy_source("src/k").unwrap(),
+            ("src".to_string(), "k".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_objects_traversal_keys_error_and_do_not_touch_outside_root() {
+        let (srv, g) = make_server("delete_objects_traversal");
+        srv.storage.create_bucket("buck").unwrap();
+        let w = srv.storage.put_object_writer("buck", "keep").unwrap();
+        w.finish("application/octet-stream").unwrap();
+        let w = srv.storage.put_object_writer("buck", "gone").unwrap();
+        w.finish("application/octet-stream").unwrap();
+
+        // Sentinel outside the storage root, reachable via `..` from data/.
+        let sentinel = g.0.parent().unwrap().join(format!(
+            "minibucket_sentinel_{}",
+            g.0.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::write(&sentinel, b"x").unwrap();
+        let sentinel_name = sentinel.file_name().unwrap().to_str().unwrap().to_string();
+
+        let xml = format!(
+            "<Delete><Object><Key>gone</Key></Object>\
+             <Object><Key>/etc/passwd</Key></Object>\
+             <Object><Key>../../../../../{}</Key></Object>\
+             <Object><Key>a//b</Key></Object></Delete>",
+            sentinel_name
+        );
+        let items = parse_delete_objects(&xml);
+        assert_eq!(items.len(), 4);
+        let out = build_delete_result(&srv, "buck", &items);
+        std::fs::remove_file(&sentinel).expect("sentinel must still exist");
+
+        assert!(out.contains("<Deleted><Key>gone</Key></Deleted>"));
+        assert!(out.contains("<Error><Key>/etc/passwd</Key><Code>InvalidArgument</Code>"));
+        assert!(out.contains("<Error><Key>a//b</Key><Code>InvalidArgument</Code>"));
+        assert!(out.contains(&format!(
+            "<Error><Key>../../../../../{}</Key>",
+            sentinel_name
+        )));
+        assert!(srv.storage.get_object("buck", "keep").is_ok());
+        assert!(srv.storage.get_object("buck", "gone").is_err());
     }
 
     #[test]
@@ -1213,6 +1385,7 @@ mod tests {
             query_raw: "".into(),
             headers,
             reader: BufReader::new(Cursor::new(body.to_vec())),
+            chunk_ctx: None,
         };
         let got = read_body_all(&mut req).unwrap();
         assert_eq!(got, b"hello");

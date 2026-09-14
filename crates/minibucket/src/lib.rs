@@ -499,6 +499,8 @@ fn handle(srv: Arc<Server>, stream: TcpStream) -> io::Result<()> {
     );
 
     let mut chunk_ctx: Option<crate::sigv4::ChunkContext> = None;
+    // Hex digest from x-amz-content-sha256 that the body must hash to.
+    let mut payload_digest: Option<String> = None;
 
     if srv.require_auth && crate::sigv4::is_presigned(&req.query_raw) {
         // ---- Presigned URL (query-string) authentication ----
@@ -539,9 +541,34 @@ fn handle(srv: Arc<Server>, stream: TcpStream) -> io::Result<()> {
                         &req.path,
                     );
                 }
-                // Build chunk-signing context for streaming PUTs.
+                // Signature is fine; now the request must also be fresh.
+                if let Err(e) =
+                    crate::sigv4::check_request_time(&info.amz_date, crate::util::now_secs())
+                {
+                    eprintln!("[auth] request time check failed: {:?}", e);
+                    let (status, code, msg) = match e {
+                        crate::sigv4::AuthError::RequestTimeTooSkewed => (
+                            403,
+                            "RequestTimeTooSkewed",
+                            "The difference between the request time and the server's time is too large",
+                        ),
+                        _ => (400, "InvalidRequest", "Missing or invalid x-amz-date"),
+                    };
+                    return error_response(
+                        &mut sock,
+                        status,
+                        code,
+                        msg,
+                        &crate::util::request_id(),
+                        &req.path,
+                    );
+                }
+                // Build the chunk-signing context for streaming bodies; it
+                // travels on the request so every body reader verifies chunks.
                 if info.payload_hash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" {
                     chunk_ctx = Some(crate::sigv4::ChunkContext::new(&secret, &info));
+                } else if crate::sigv4::is_hex_digest(&info.payload_hash) {
+                    payload_digest = Some(info.payload_hash.clone());
                 }
             }
             Err(crate::sigv4::AuthError::Missing) => {
@@ -568,13 +595,99 @@ fn handle(srv: Arc<Server>, stream: TcpStream) -> io::Result<()> {
         }
     }
 
-    if let Err(e) = crate::s3::dispatch(&srv, req, &mut sock, chunk_ctx) {
+    let mut req = match wrap_body(req, payload_digest.as_deref(), &mut sock) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    req.chunk_ctx = chunk_ctx;
+
+    let path = req.path.clone();
+    let result = crate::s3::dispatch(&srv, req, &mut sock);
+    if let Err(e) = result {
         eprintln!("[handler] {}", e);
+        if crate::sigv4::is_content_sha256_mismatch(&e) {
+            return error_response(
+                &mut sock,
+                400,
+                "XAmzContentSHA256Mismatch",
+                "The provided 'x-amz-content-sha256' header does not match what was computed",
+                &crate::util::request_id(),
+                &path,
+            );
+        }
+        if crate::sigv4::is_incomplete_body(&e) {
+            return error_response(
+                &mut sock,
+                400,
+                "IncompleteBody",
+                "You did not provide the number of bytes specified by the Content-Length HTTP header",
+                &crate::util::request_id(),
+                &path,
+            );
+        }
         let resp = Response::new(500).header("Connection", "close");
         let _ = resp.write_headers(&mut sock, Some(0));
     }
     let _ = sock.flush();
     Ok(())
+}
+
+type BodyReader = crate::sigv4::PayloadHashReader<std::io::BufReader<TcpStream>>;
+
+// Put the body-hash verifier between the socket and the handlers. With no
+// digest (anonymous mode, UNSIGNED-PAYLOAD, streaming bodies) the wrapper is
+// transparent. A zero-length body is checked immediately; on mismatch the S3
+// error has already been written and Err(<write result>) is returned.
+fn wrap_body(
+    req: crate::http::Request<std::io::BufReader<TcpStream>>,
+    digest: Option<&str>,
+    sock: &mut TcpStream,
+) -> Result<crate::http::Request<BodyReader>, io::Result<()>> {
+    let crate::http::Request {
+        method,
+        raw_path,
+        path,
+        query_raw,
+        headers,
+        reader,
+        chunk_ctx,
+    } = req;
+    let is_chunked = headers
+        .get("content-encoding")
+        .map(|v| v.contains("aws-chunked"))
+        .unwrap_or(false);
+    let reader = match digest {
+        // aws-chunked bodies are covered by per-chunk signatures instead.
+        Some(d) if !is_chunked => {
+            let len: u64 = headers
+                .get("content-length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            match crate::sigv4::PayloadHashReader::verifying(reader, d, len) {
+                Ok(r) => r,
+                Err(_) => {
+                    return Err(error_response(
+                        sock,
+                        400,
+                        "XAmzContentSHA256Mismatch",
+                        "The provided 'x-amz-content-sha256' header does not match what was computed",
+                        &crate::util::request_id(),
+                        &path,
+                    ));
+                }
+            }
+        }
+        _ => crate::sigv4::PayloadHashReader::passthrough(reader),
+    };
+    Ok(crate::http::Request {
+        method,
+        raw_path,
+        path,
+        query_raw,
+        headers,
+        reader,
+        chunk_ctx,
+    })
 }
 
 // Verify a presigned (query-string) SigV4 request. On any failure this writes
@@ -806,5 +919,150 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<Prepared>();
         assert_send::<Config>();
+    }
+
+    // ---- handler-level tests: raw HTTP over a loopback socket ----
+
+    use std::io::Read;
+
+    struct TempRoot(PathBuf);
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_server(label: &str) -> (Prepared, TempRoot) {
+        let mut root = std::env::temp_dir();
+        root.push(format!(
+            "minibucket_handle_{}_{}",
+            label,
+            crate::storage::new_version_id()
+        ));
+        let cfg = Config {
+            bind: "127.0.0.1:0".to_string(),
+            root: root.clone(),
+            keys: vec![("AKIA".to_string(), "secret".to_string())],
+            ..Config::default()
+        };
+        let ready = prepare(cfg).unwrap();
+        ready.server.storage.create_bucket("buck").unwrap();
+        (ready, TempRoot(root))
+    }
+
+    // Send one raw request through handle() and return the full response.
+    fn roundtrip(ready: &Prepared, raw: &[u8]) -> String {
+        let addr = ready.local_addr().unwrap();
+        let srv = Arc::clone(&ready.server);
+        let listener = ready.listener.try_clone().unwrap();
+        let t = thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            handle(srv, s).unwrap();
+        });
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.write_all(raw).unwrap();
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut resp = String::new();
+        c.read_to_string(&mut resp).unwrap();
+        t.join().unwrap();
+        resp
+    }
+
+    fn amz_date_at(secs: u64) -> String {
+        crate::util::iso8601(secs)
+            .replace(['-', ':'], "")
+            .replace(".000Z", "Z")
+    }
+
+    // A header-signed PUT /buck/k. `declared` is the body the signature and
+    // x-amz-content-sha256 are computed for, `sent` is what goes on the wire.
+    fn signed_put(host: &str, amz_date: &str, declared: &[u8], sent: &[u8]) -> Vec<u8> {
+        use crate::sigv4::{canonical_request, signing_key, string_to_sign};
+        let date = &amz_date[..8];
+        let digest = crate::sha256::hex(&crate::sha256::sha256(declared));
+        let mut h = crate::http::Headers::default();
+        h.insert("host", host);
+        h.insert("x-amz-content-sha256", &digest);
+        h.insert("x-amz-date", amz_date);
+        let signed: Vec<String> = ["host", "x-amz-content-sha256", "x-amz-date"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let canon = canonical_request("PUT", "/buck/k", "", &h, &signed, &digest);
+        let scope = format!("{}/us-east-1/s3/aws4_request", date);
+        let sts = string_to_sign(amz_date, &scope, &canon);
+        let key = signing_key("secret", date, "us-east-1", "s3");
+        let sig = crate::sha256::hex(&crate::hmac::hmac_sha256(&key, sts.as_bytes()));
+        let mut raw = format!(
+            "PUT /buck/k HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n\
+             x-amz-content-sha256: {}\r\nx-amz-date: {}\r\n\
+             Authorization: AWS4-HMAC-SHA256 Credential=AKIA/{}, \
+             SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={}\r\n\r\n",
+            host,
+            sent.len(),
+            digest,
+            amz_date,
+            scope,
+            sig
+        )
+        .into_bytes();
+        raw.extend_from_slice(sent);
+        raw
+    }
+
+    #[test]
+    fn put_with_matching_body_hash_is_stored() {
+        let (ready, _root) = test_server("ok");
+        let host = ready.local_addr().unwrap().to_string();
+        let now = amz_date_at(crate::util::now_secs());
+        let resp = roundtrip(&ready, &signed_put(&host, &now, b"hello", b"hello"));
+        assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
+        let (_, mut f) = ready.server.storage.get_object("buck", "k").unwrap();
+        let mut got = Vec::new();
+        f.read_to_end(&mut got).unwrap();
+        assert_eq!(got, b"hello");
+    }
+
+    // A captured, validly signed PUT replayed with a different body of the
+    // same length must be rejected and must not overwrite the object.
+    #[test]
+    fn put_replayed_with_different_body_is_rejected() {
+        let (ready, _root) = test_server("replay");
+        let host = ready.local_addr().unwrap().to_string();
+        let now = amz_date_at(crate::util::now_secs());
+        let resp = roundtrip(&ready, &signed_put(&host, &now, b"hello", b"hellO"));
+        assert!(resp.starts_with("HTTP/1.1 400"), "{}", resp);
+        assert!(
+            resp.contains("<Code>XAmzContentSHA256Mismatch</Code>"),
+            "{}",
+            resp
+        );
+        assert!(ready.server.storage.get_object("buck", "k").is_err());
+        // No temp file left behind either.
+        let data_dir = _root.0.join("buck").join("data");
+        let leftovers: Vec<_> = std::fs::read_dir(&data_dir)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "{:?}", leftovers);
+    }
+
+    #[test]
+    fn stale_request_time_is_rejected_and_fresh_is_accepted() {
+        let (ready, _root) = test_server("skew");
+        let host = ready.local_addr().unwrap().to_string();
+        let now = crate::util::now_secs();
+
+        let old = amz_date_at(now - 20 * 60);
+        let resp = roundtrip(&ready, &signed_put(&host, &old, b"x", b"x"));
+        assert!(resp.starts_with("HTTP/1.1 403"), "{}", resp);
+        assert!(
+            resp.contains("<Code>RequestTimeTooSkewed</Code>"),
+            "{}",
+            resp
+        );
+
+        let recent = amz_date_at(now - 60);
+        let resp = roundtrip(&ready, &signed_put(&host, &recent, b"x", b"x"));
+        assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
     }
 }
