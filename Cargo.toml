@@ -5,7 +5,7 @@ members = ["crates/*"]
 # One version for the whole suite: every crate and every image ships with the
 # same number. Bump with `just set-version` / `just release`.
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/p-arndt/minisuite"
