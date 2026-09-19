@@ -19,5 +19,8 @@ jobs:
     with:
       name: minisuite
       binaries: minicloak minimail minibucket minisuite
-      extra-files: README.md LICENSE minisuite.example.toml crates/minicloak/minicloak.example.toml
+      extra-files: >-
+        README.md LICENSE minisuite.example.toml crates/minicloak/minicloak.example.toml
+        crates/minimail/creds.example=minimail.creds.example
+        crates/minibucket/creds.example=minibucket.creds.example
       images: '["minicloak", "minimail", "minibucket", "minisuite"]'
