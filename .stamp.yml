@@ -4,11 +4,9 @@
 # [workspace.package] version, which every crate inherits via
 # `version.workspace = true`, and which every image is tagged with.
 #
-# Cargo.lock also carries that number, once per workspace member, but those live
-# in `[[package]]` array-of-tables entries that stamp deliberately will not
-# rewrite (a key path inside a repeating table is ambiguous). scripts/release.mjs
-# closes that gap by running `cargo update --workspace` between `stamp set` and
-# `stamp release` — use `just release`, not `stamp release`, to cut a release.
+# Cargo.lock also carries that number, once per workspace member, in
+# `[[package]]` entries stamp does not rewrite. The after_write hook refreshes
+# them, and stamp puts the updated Cargo.lock into the release commit.
 
 project: minisuite
 
@@ -22,3 +20,7 @@ release:
   commit: "release: {{ tag }}"
   push: true
   prerelease: beta
+
+hooks:
+  after_write:
+    - cargo update --workspace

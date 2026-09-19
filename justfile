@@ -29,29 +29,6 @@ run crate="minisuite" *ARGS:
 # The full local CI gate — mirrors .github/workflows/ci.yml. Run before pushing.
 ci: fmt-check clippy test smoke
 
-# stamp cannot rewrite the per-member versions in Cargo.lock, so every version
-# change is followed by `cargo update --workspace` (see scripts/release.mjs).
-
-# Write a version into Cargo.toml + Cargo.lock without committing.
-#   just set-version patch        just set-version 0.3.0
-set-version BUMP="patch":
-    stamp set {{BUMP}} && cargo update --workspace
-
-# Cut a release: bump, refresh Cargo.lock, commit, tag `v<x.y.z>`, push.
-#   just release            just release minor            just release 1.0.0
-release BUMP="patch":
-    node scripts/release.mjs {{BUMP}}
-
-# Show what `just release BUMP` would do without writing anything.
-release-dry BUMP="patch":
-    node scripts/release.mjs {{BUMP}} --dry-run
-
-# Plain `stamp prerelease` would commit Cargo.toml without Cargo.lock. Pass an
-# explicit pre-release version to `just release` instead.
-prerelease BUMP="patch":
-    @echo "not supported here: use  just release <x.y.z-beta.N>  (keeps Cargo.lock in sync)"
-    @exit 1
-
 # ---------------------------------------------------------------------------
 # Testing
 # ---------------------------------------------------------------------------
