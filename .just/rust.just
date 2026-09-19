@@ -1,4 +1,4 @@
-# rust.just — Cargo recipes. Synced from ~/coding/just-common.
+# rust.just — Cargo recipes. Synced from github.com/p-arndt/just-common.
 #
 # May override (needs `set allow-duplicate-variables`):
 #   CARGO_SCOPE := "-p mycrate"     default "--workspace"
