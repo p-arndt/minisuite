@@ -1,3 +1,6 @@
+# The shared rust-ci workflow runs lockfile check, fmt, clippy and tests on
+# ubuntu, macOS and Windows. The smoke, interop and docker jobs are project
+# specific and stay as local jobs next to it.
 name: CI
 
 on:
@@ -5,48 +8,16 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Format, lint and unit-test the whole workspace on all three OSes. Every
-  # crate builds from std alone, so there is nothing to install beyond rustup.
-  # ---------------------------------------------------------------------------
-  test:
-    name: fmt + clippy + test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-
-      # Cargo.lock carries the workspace version once per member, and is
-      # refreshed by `just release`. --locked fails if it drifted from
-      # Cargo.toml, which would otherwise only surface at release time.
-      - name: Cargo.lock is up to date
-        run: cargo metadata --locked --format-version 1 > /dev/null
-        shell: bash
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --workspace
+  rust:
+    uses: p-arndt/.github/.github/workflows/rust-ci.yml@v1
 
   # ---------------------------------------------------------------------------
   # Drive the real network surface of all three servers from Python. The runner
