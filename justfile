@@ -1,29 +1,24 @@
 # minisuite — workspace task runner
 #
 # Install `just`:  winget install Casey.Just   (or  cargo install just)
-# List recipes:    just            (or  just --list)
+# List recipes:    just
 #
 # The release recipes need `stamp` (https://github.com/p-arndt/stamp) on PATH:
 #   Windows:        irm https://raw.githubusercontent.com/p-arndt/stamp/main/install.ps1 | iex
 #   macOS / Linux:  curl -fsSL https://raw.githubusercontent.com/p-arndt/stamp/main/install.sh | sh
 #
-# minisuite is a Cargo workspace with four std-only binaries — minicloak (OIDC),
-# minimail (SMTP sink), minibucket (S3) and minisuite (all three in one process).
-# Recipe bodies stay one line each and shell out to scripts/*.mjs for anything
-# involving background processes, so every recipe behaves identically under
-# PowerShell on Windows and sh on Linux/macOS.
+# Shared recipes (build, test, fmt, clippy/lint, version, …) live in .just/, copied
+# from ~/coding/just-common. Edit them there and run `just sync-common`; this file
+# only holds what is specific to minisuite and the recipes it overrides.
 
-# Run recipes through PowerShell on Windows (the default is cmd.exe).
-set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
+import '.just/common.just'
+import '.just/rust.just'
+import '.just/release.just'
 
-alias lint := clippy
-
-# Default: show the recipe list.
-default:
-    @just --list
+set allow-duplicate-recipes
 
 # ---------------------------------------------------------------------------
-# Dev
+# Overrides of shared recipes
 # ---------------------------------------------------------------------------
 
 # Run a binary from source:  just run                 (the whole suite)
@@ -31,46 +26,41 @@ default:
 run crate="minisuite" *ARGS:
     cargo run -p {{crate}} -- {{ARGS}}
 
-# Build every crate (debug).
-build:
-    cargo build --workspace
+# The full local CI gate — mirrors .github/workflows/ci.yml. Run before pushing.
+ci: fmt-check clippy test smoke
 
-# Build every crate optimized (-> target/release/{minicloak,minimail,minibucket,minisuite}).
-build-release:
-    cargo build --workspace --release
+# stamp cannot rewrite the per-member versions in Cargo.lock, so every version
+# change is followed by `cargo update --workspace` (see scripts/release.mjs).
+
+# Write a version into Cargo.toml + Cargo.lock without committing.
+#   just set-version patch        just set-version 0.3.0
+set-version BUMP="patch":
+    stamp set {{BUMP}} && cargo update --workspace
+
+# Cut a release: bump, refresh Cargo.lock, commit, tag `v<x.y.z>`, push.
+#   just release            just release minor            just release 1.0.0
+release BUMP="patch":
+    node scripts/release.mjs {{BUMP}}
+
+# Show what `just release BUMP` would do without writing anything.
+release-dry BUMP="patch":
+    node scripts/release.mjs {{BUMP}} --dry-run
+
+# Plain `stamp prerelease` would commit Cargo.toml without Cargo.lock. Pass an
+# explicit pre-release version to `just release` instead.
+prerelease BUMP="patch":
+    @echo "not supported here: use  just release <x.y.z-beta.N>  (keeps Cargo.lock in sync)"
+    @exit 1
 
 # ---------------------------------------------------------------------------
-# Quality
+# Testing
 # ---------------------------------------------------------------------------
-
-# Type-check the workspace (faster than a full build).
-check:
-    cargo check --workspace --all-targets
-
-# Run the Rust test suite.
-test:
-    cargo test --workspace
-
-# Format all Rust code.
-fmt:
-    cargo fmt --all
-
-# Verify formatting without writing changes (CI gate).
-fmt-check:
-    cargo fmt --all --check
-
-# Lint with clippy (warnings as errors).
-clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
 
 # End-to-end Python smoke tests: build, start the server, run smoketest.py, stop.
 #   just smoke              # all three, sequentially
 #   just smoke minibucket   # one service  (needs: pip install boto3)
 smoke crate="all":
     node scripts/smoke.mjs {{crate}}
-
-# The full local CI gate — mirrors .github/workflows/ci.yml. Run before pushing.
-ci: fmt-check clippy test smoke
 
 # ---------------------------------------------------------------------------
 # Docker (mirrors what the release workflow publishes to ghcr.io)
@@ -116,38 +106,3 @@ compose-up:
 # Stop the stack (named volumes survive; add -v by hand to wipe them).
 compose-down:
     docker compose down
-
-# ---------------------------------------------------------------------------
-# Release
-# ---------------------------------------------------------------------------
-
-# Print the one version shared by every crate and image (see .stamp.yml).
-version:
-    @stamp current
-
-# Write a version into Cargo.toml + Cargo.lock WITHOUT committing. Accepts a
-# bump keyword or an explicit version. This is the correction command; to cut a
-# release use `just release`.
-#   just set-version patch        just set-version 0.3.0
-set-version BUMP="patch":
-    stamp set {{BUMP}} && cargo update --workspace
-
-# Cut a release: bump the version, refresh Cargo.lock, commit, tag `v<x.y.z>`
-# and push -> triggers the release workflow (multi-arch archives + four ghcr.io
-# images). Refuses to run on a dirty tree.
-#   just release            just release minor            just release 1.0.0
-release BUMP="patch":
-    node scripts/release.mjs {{BUMP}}
-
-# Show what `just release BUMP` would do — the plan and every stamp check —
-# without writing anything.
-release-dry BUMP="patch":
-    node scripts/release.mjs {{BUMP}} --dry-run
-
-# ---------------------------------------------------------------------------
-# Housekeeping
-# ---------------------------------------------------------------------------
-
-# Remove build artifacts (including target/smoke).
-clean:
-    cargo clean
