@@ -1032,6 +1032,7 @@ mod tests {
             headers,
             reader: io::BufReader::new(io::Cursor::new(body)),
             chunk_ctx: None,
+            expect_continue: false,
         }
     }
 

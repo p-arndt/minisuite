@@ -1270,6 +1270,7 @@ mod tests {
             headers,
             reader: BufReader::new(Cursor::new(payload.to_vec())),
             chunk_ctx: None,
+            expect_continue: false,
         };
         let got = read_body_all(&mut req).unwrap();
         assert_eq!(got, payload);
@@ -1284,6 +1285,7 @@ mod tests {
             headers: Headers::default(),
             reader: BufReader::new(Cursor::new(Vec::new())),
             chunk_ctx: None,
+            expect_continue: false,
         }
     }
 
@@ -1386,6 +1388,7 @@ mod tests {
             headers,
             reader: BufReader::new(Cursor::new(body.to_vec())),
             chunk_ctx: None,
+            expect_continue: false,
         };
         let got = read_body_all(&mut req).unwrap();
         assert_eq!(got, b"hello");

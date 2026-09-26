@@ -623,6 +623,7 @@ mod tests {
             headers,
             reader: BufReader::new(Cursor::new(body.to_vec())),
             chunk_ctx: None,
+            expect_continue: false,
         }
     }
 

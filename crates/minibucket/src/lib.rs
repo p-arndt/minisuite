@@ -601,6 +601,14 @@ fn handle(srv: Arc<Server>, stream: TcpStream) -> io::Result<()> {
     };
     req.chunk_ctx = chunk_ctx;
 
+    // Only now that the request is authenticated: a rejected request gets its
+    // final error status instead (RFC 9110 10.1.1), so the client never
+    // uploads a body we would discard. Without this interim response clients
+    // such as the AWS SDK stall for their fallback timeout before sending.
+    if req.expect_continue {
+        crate::http::write_continue(&mut sock)?;
+    }
+
     let path = req.path.clone();
     let result = crate::s3::dispatch(&srv, req, &mut sock);
     if let Err(e) = result {
@@ -651,6 +659,7 @@ fn wrap_body(
         headers,
         reader,
         chunk_ctx,
+        expect_continue,
     } = req;
     let is_chunked = headers
         .get("content-encoding")
@@ -687,6 +696,7 @@ fn wrap_body(
         headers,
         reader,
         chunk_ctx,
+        expect_continue,
     })
 }
 
@@ -1044,6 +1054,95 @@ mod tests {
             .map(|d| d.flatten().map(|e| e.file_name()).collect())
             .unwrap_or_default();
         assert!(leftovers.is_empty(), "{:?}", leftovers);
+    }
+
+    // Split a raw request into its head (with `Expect: 100-continue` added)
+    // and its body, so a test can send them separately like a real client.
+    fn with_expect_continue(raw: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let mut head = raw[..end + 2].to_vec();
+        head.extend_from_slice(b"Expect: 100-continue\r\n\r\n");
+        (head, raw[end + 4..].to_vec())
+    }
+
+    // Read until the end of one response head (or EOF), byte by byte so no
+    // bytes of a following response are swallowed.
+    fn read_head(c: &mut TcpStream) -> String {
+        let mut out = Vec::new();
+        let mut b = [0u8; 1];
+        while !out.ends_with(b"\r\n\r\n") {
+            match c.read(&mut b) {
+                Ok(0) => break,
+                Ok(_) => out.push(b[0]),
+                Err(e) => panic!("no response head within the timeout: {e} (got {out:?})"),
+            }
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    // Clients like the AWS SDK hold a large body back until they see
+    // `100 Continue`; without it every upload stalls for the SDK's timeout.
+    #[test]
+    fn expect_continue_gets_interim_response_before_the_body() {
+        let (ready, _root) = test_server("continue");
+        let host = ready.local_addr().unwrap().to_string();
+        let now = amz_date_at(crate::util::now_secs());
+        let body = vec![b'x'; 256 * 1024];
+        let (head, body) = with_expect_continue(&signed_put(&host, &now, &body, &body));
+
+        let addr = ready.local_addr().unwrap();
+        let srv = Arc::clone(&ready.server);
+        let listener = ready.listener.try_clone().unwrap();
+        let t = thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            handle(srv, s).unwrap();
+        });
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        c.write_all(&head).unwrap();
+        assert_eq!(read_head(&mut c), "HTTP/1.1 100 Continue\r\n\r\n");
+
+        c.write_all(&body).unwrap();
+        let mut resp = String::new();
+        c.read_to_string(&mut resp).unwrap();
+        t.join().unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
+        let (_, mut f) = ready.server.storage.get_object("buck", "k").unwrap();
+        let mut got = Vec::new();
+        f.read_to_end(&mut got).unwrap();
+        assert_eq!(got, body);
+    }
+
+    // A request that fails authentication gets its final status straight
+    // away instead of an invitation to upload the body.
+    #[test]
+    fn expect_continue_with_bad_signature_gets_final_error() {
+        let (ready, _root) = test_server("continue_denied");
+        let host = ready.local_addr().unwrap().to_string();
+        let now = amz_date_at(crate::util::now_secs());
+        let raw = signed_put(&host, &now, b"hello", b"hello");
+        let raw = String::from_utf8(raw)
+            .unwrap()
+            .replace("Signature=", "Signature=0")
+            .into_bytes();
+        let (head, _) = with_expect_continue(&raw);
+
+        let addr = ready.local_addr().unwrap();
+        let srv = Arc::clone(&ready.server);
+        let listener = ready.listener.try_clone().unwrap();
+        let t = thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            handle(srv, s).unwrap();
+        });
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        c.write_all(&head).unwrap();
+        let resp = read_head(&mut c);
+        t.join().unwrap();
+        assert!(resp.starts_with("HTTP/1.1 403"), "{}", resp);
+        assert!(ready.server.storage.get_object("buck", "k").is_err());
     }
 
     #[test]

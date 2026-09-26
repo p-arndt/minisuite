@@ -18,6 +18,9 @@ pub struct Request<R: BufRead = BufReader<TcpStream>> {
     // bodies. Set by the auth layer, taken by whichever body reader consumes
     // the request, so every route verifies chunk signatures.
     pub chunk_ctx: Option<crate::sigv4::ChunkContext>,
+    // The client sent `Expect: 100-continue` and holds the body back until it
+    // sees an interim `100 Continue` (or gives up after its own timeout).
+    pub expect_continue: bool,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -53,7 +56,7 @@ pub fn read_request(stream: TcpStream) -> io::Result<Request<BufReader<TcpStream
     let mut it = line.splitn(3, ' ');
     let method = it.next().unwrap_or("").to_string();
     let target = it.next().unwrap_or("").to_string();
-    let _version = it.next().unwrap_or("HTTP/1.1").to_string();
+    let version = it.next().unwrap_or("HTTP/1.1").to_string();
 
     let (raw_path, query_raw) = match target.find('?') {
         Some(i) => (target[..i].to_string(), target[i + 1..].to_string()),
@@ -62,6 +65,7 @@ pub fn read_request(stream: TcpStream) -> io::Result<Request<BufReader<TcpStream
     let path = crate::url::percent_decode_str(&raw_path);
 
     let headers = read_headers(&mut reader)?;
+    let expect_continue = expects_continue(&version, &headers);
 
     Ok(Request {
         method,
@@ -71,7 +75,23 @@ pub fn read_request(stream: TcpStream) -> io::Result<Request<BufReader<TcpStream
         headers,
         reader,
         chunk_ctx: None,
+        expect_continue,
     })
+}
+
+// RFC 9110 10.1.1: a 100-continue expectation in an HTTP/1.0 request must be
+// ignored, since such a client cannot parse an interim response.
+fn expects_continue(version: &str, headers: &Headers) -> bool {
+    version != "HTTP/1.0"
+        && headers
+            .get("expect")
+            .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"))
+}
+
+// The interim response that releases a body held back by `Expect: 100-continue`.
+pub fn write_continue<W: Write>(w: &mut W) -> io::Result<()> {
+    w.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+    w.flush()
 }
 
 // Parse header lines up to and including the blank line. Generic over BufRead
@@ -598,6 +618,18 @@ mod tests {
         assert!(out.contains("ETag: \"abc\"\r\n"));
         assert!(out.contains("Content-Length: 4\r\n"));
         assert!(out.ends_with("\r\n\r\n<x/>"));
+    }
+
+    #[test]
+    fn expect_continue_is_honoured_for_http11_only() {
+        let mut h = Headers::default();
+        h.insert("Expect", "100-Continue");
+        assert!(expects_continue("HTTP/1.1", &h));
+        assert!(!expects_continue("HTTP/1.0", &h));
+        assert!(!expects_continue("HTTP/1.1", &Headers::default()));
+        let mut other = Headers::default();
+        other.insert("Expect", "something-else");
+        assert!(!expects_continue("HTTP/1.1", &other));
     }
 
     #[test]
