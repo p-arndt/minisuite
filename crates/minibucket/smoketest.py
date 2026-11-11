@@ -54,11 +54,24 @@ t("delete tagging",            lambda: s3.delete_object_tagging(Bucket="testbk",
 t("list v2",                   lambda: sorted(o["Key"] for o in s3.list_objects_v2(Bucket="testbk").get("Contents", [])))
 t("range get",                 lambda: s3.get_object(Bucket="testbk", Key="hello.txt", Range="bytes=2-4")["Body"].read())
 
+def expect(got, want):
+    if got != want:
+        raise AssertionError(f"got {got!r}, want {want!r}")
+    return got
+
+t("put with metadata",         lambda: s3.put_object(Bucket="testbk", Key="meta.txt", Body=b"m", Metadata={"Foo": "bar"})["ETag"])
+t("head returns metadata",     lambda: expect(s3.head_object(Bucket="testbk", Key="meta.txt")["Metadata"], {"foo": "bar"}))
+t("copy keeps metadata",       lambda: expect(s3.copy_object(Bucket="testbk", Key="meta-copy.txt", CopySource="testbk/meta.txt") and
+                                              s3.get_object(Bucket="testbk", Key="meta-copy.txt")["Metadata"], {"foo": "bar"}))
+t("copy replaces metadata",    lambda: expect(s3.copy_object(Bucket="testbk", Key="meta-copy.txt", CopySource="testbk/meta.txt",
+                                                             MetadataDirective="REPLACE", Metadata={"new": "1"}) and
+                                              s3.head_object(Bucket="testbk", Key="meta-copy.txt")["Metadata"], {"new": "1"}))
+
 t("list buckets",              lambda: [b["Name"] for b in s3.list_buckets()["Buckets"]])
 
 # Cleanup
 t("delete all",                lambda: s3.delete_objects(Bucket="testbk", Delete={"Objects":[{"Key":k} for k in
-                                  ["hello.txt","hello-copy.txt","dir/a/b.txt","big.bin"]]})["Deleted"])
+                                  ["hello.txt","hello-copy.txt","dir/a/b.txt","big.bin","meta.txt","meta-copy.txt"]]})["Deleted"])
 t("delete bucket",             lambda: s3.delete_bucket(Bucket="testbk"))
 
 print(f"\n{passed} passed, {failed} failed")

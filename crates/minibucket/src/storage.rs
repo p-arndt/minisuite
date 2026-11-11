@@ -29,7 +29,11 @@ pub struct ObjectMeta {
     pub etag: String,
     pub last_modified: u64,
     pub version_id: Option<String>,
+    // S3 user metadata as (lower-cased name without the `x-amz-meta-` prefix, value).
+    pub user_meta: Vec<(String, String)>,
 }
+
+pub const USER_META_PREFIX: &str = "x-amz-meta-";
 
 pub struct BucketInfo {
     pub name: String,
@@ -344,6 +348,7 @@ impl Storage {
             etag: String::new(),
             last_modified: 0,
             version_id: None,
+            user_meta: Vec::new(),
         });
         let f = File::open(&p)?;
         Ok((meta, f))
@@ -372,6 +377,7 @@ impl Storage {
             etag: String::new(),
             last_modified: 0,
             version_id: None,
+            user_meta: Vec::new(),
         });
         meta.version_id = Some(version_id.to_string());
         let f = File::open(&data)?;
@@ -690,7 +696,11 @@ impl ObjectWriter {
         Ok(())
     }
     // Returns (etag, size, version_id-if-versioning-enabled).
-    pub fn finish(mut self, content_type: &str) -> io::Result<(String, u64, Option<String>)> {
+    pub fn finish(
+        mut self,
+        content_type: &str,
+        user_meta: &[(String, String)],
+    ) -> io::Result<(String, u64, Option<String>)> {
         self.file.flush()?;
         drop(self.file);
         if let Some(parent) = self.meta_path.parent() {
@@ -703,6 +713,14 @@ impl ObjectWriter {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let meta = ObjectMeta {
+            content_type: content_type.to_string(),
+            size: self.size,
+            etag: etag.clone(),
+            last_modified: now,
+            version_id: None,
+            user_meta: user_meta.to_vec(),
+        };
 
         let version_id = if self.versioning.records_versions() {
             let vid = new_version_id();
@@ -712,25 +730,17 @@ impl ObjectWriter {
                 &self.final_path,
                 self.versions_dir.join(format!("{}.data", vid)),
             )?;
-            let mut vmf = File::create(self.versions_dir.join(format!("{}.meta", vid)))?;
-            writeln!(vmf, "content-type: {}", content_type)?;
-            writeln!(vmf, "size: {}", self.size)?;
-            writeln!(vmf, "etag: {}", etag)?;
-            writeln!(vmf, "last-modified: {}", now)?;
-            writeln!(vmf, "version-id: {}", vid)?;
+            write_meta(
+                &self.versions_dir.join(format!("{}.meta", vid)),
+                &meta,
+                Some(&vid),
+            )?;
             Some(vid)
         } else {
             None
         };
 
-        let mut mf = File::create(&self.meta_path)?;
-        writeln!(mf, "content-type: {}", content_type)?;
-        writeln!(mf, "size: {}", self.size)?;
-        writeln!(mf, "etag: {}", etag)?;
-        writeln!(mf, "last-modified: {}", now)?;
-        if let Some(v) = &version_id {
-            writeln!(mf, "version-id: {}", v)?;
-        }
+        write_meta(&self.meta_path, &meta, version_id.as_deref())?;
         Ok((etag, self.size, version_id))
     }
     pub fn abort(self) {
@@ -883,6 +893,28 @@ fn read_marker_time(p: &Path) -> io::Result<u64> {
     Ok(s.trim().parse().unwrap_or(0))
 }
 
+// One `name: value` line per field. Metadata values are sanitised so a stray
+// CR/LF can never split into a forged field line.
+fn write_meta(p: &Path, meta: &ObjectMeta, version_id: Option<&str>) -> io::Result<()> {
+    let mut out = String::new();
+    out.push_str(&format!("content-type: {}\n", meta.content_type));
+    out.push_str(&format!("size: {}\n", meta.size));
+    out.push_str(&format!("etag: {}\n", meta.etag));
+    out.push_str(&format!("last-modified: {}\n", meta.last_modified));
+    if let Some(v) = version_id {
+        out.push_str(&format!("version-id: {}\n", v));
+    }
+    for (k, v) in &meta.user_meta {
+        out.push_str(&format!(
+            "{}{}: {}\n",
+            USER_META_PREFIX,
+            k,
+            crate::http::sanitize_header_value(v)
+        ));
+    }
+    fs::write(p, out)
+}
+
 fn read_meta(p: &Path) -> Result<ObjectMeta, StorageError> {
     if !p.exists() {
         return Err(StorageError::NotFound);
@@ -895,6 +927,7 @@ fn read_meta(p: &Path) -> Result<ObjectMeta, StorageError> {
     let mut etag = String::new();
     let mut last_modified = 0u64;
     let mut version_id: Option<String> = None;
+    let mut user_meta = Vec::new();
     for line in s.lines() {
         if let Some(v) = line.strip_prefix("content-type: ") {
             content_type = v.to_string();
@@ -906,6 +939,10 @@ fn read_meta(p: &Path) -> Result<ObjectMeta, StorageError> {
             last_modified = v.parse().unwrap_or(0);
         } else if let Some(v) = line.strip_prefix("version-id: ") {
             version_id = Some(v.to_string());
+        } else if let Some(rest) = line.strip_prefix(USER_META_PREFIX) {
+            if let Some((k, v)) = rest.split_once(": ") {
+                user_meta.push((k.to_string(), v.to_string()));
+            }
         }
     }
     Ok(ObjectMeta {
@@ -914,6 +951,7 @@ fn read_meta(p: &Path) -> Result<ObjectMeta, StorageError> {
         etag,
         last_modified,
         version_id,
+        user_meta,
     })
 }
 
@@ -1120,7 +1158,7 @@ mod tests {
         let mut w = s.put_object_writer("buck", "k.txt").unwrap();
         w.write(b"hello ").unwrap();
         w.write(b"world").unwrap();
-        let (etag, size, vid) = w.finish("text/plain").unwrap();
+        let (etag, size, vid) = w.finish("text/plain", &[]).unwrap();
         assert_eq!(size, 11);
         // md5("hello world") = 5eb63bbbe01eeed093cb22bb8f5acdc3
         assert_eq!(etag, "5eb63bbbe01eeed093cb22bb8f5acdc3");
@@ -1146,7 +1184,7 @@ mod tests {
         let (s, _g) = fresh("not_empty");
         s.create_bucket("buck").unwrap();
         let w = s.put_object_writer("buck", "k").unwrap();
-        w.finish("application/octet-stream").unwrap();
+        w.finish("application/octet-stream", &[]).unwrap();
         assert!(matches!(
             s.delete_bucket("buck"),
             Err(StorageError::NotEmpty)
@@ -1169,7 +1207,7 @@ mod tests {
         s.create_bucket("buck").unwrap();
         for k in &["a.txt", "dir/x", "dir/y", "dir2/z", "other"] {
             let w = s.put_object_writer("buck", k).unwrap();
-            w.finish("application/octet-stream").unwrap();
+            w.finish("application/octet-stream", &[]).unwrap();
         }
         // No delimiter: full list.
         let r = s.list_objects("buck", "", None, 1000, None).unwrap();
@@ -1217,13 +1255,13 @@ mod tests {
         // First put.
         let mut w = s.put_object_writer("buck", "k").unwrap();
         w.write(b"v1").unwrap();
-        let (_, _, vid1) = w.finish("text/plain").unwrap();
+        let (_, _, vid1) = w.finish("text/plain", &[]).unwrap();
         let vid1 = vid1.expect("version id present when versioning enabled");
 
         // Second put: latest changes to v2 but v1 still retrievable.
         let mut w = s.put_object_writer("buck", "k").unwrap();
         w.write(b"v2_long").unwrap();
-        let (_, _, vid2) = w.finish("text/plain").unwrap();
+        let (_, _, vid2) = w.finish("text/plain", &[]).unwrap();
         let vid2 = vid2.unwrap();
         assert_ne!(vid1, vid2);
 
@@ -1305,7 +1343,7 @@ mod tests {
         s.create_bucket("buck").unwrap();
         for k in &["a", "b", "c", "d"] {
             let w = s.put_object_writer("buck", k).unwrap();
-            w.finish("application/octet-stream").unwrap();
+            w.finish("application/octet-stream", &[]).unwrap();
         }
         let r = s.list_objects("buck", "", None, 1000, Some("b")).unwrap();
         let keys: Vec<&str> = r.contents.iter().map(|e| e.key.as_str()).collect();

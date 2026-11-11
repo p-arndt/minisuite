@@ -1164,4 +1164,246 @@ mod tests {
         let resp = roundtrip(&ready, &signed_put(&host, &recent, b"x", b"x"));
         assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
     }
+
+    // ---- S3 user metadata (x-amz-meta-*) ----
+
+    fn anon_server(label: &str) -> (Prepared, TempRoot) {
+        let mut root = std::env::temp_dir();
+        root.push(format!(
+            "minibucket_meta_{}_{}",
+            label,
+            crate::storage::new_version_id()
+        ));
+        let cfg = Config {
+            bind: "127.0.0.1:0".to_string(),
+            root: root.clone(),
+            anonymous: true,
+            ..Config::default()
+        };
+        let ready = prepare(cfg).unwrap();
+        ready.server.storage.create_bucket("buck").unwrap();
+        (ready, TempRoot(root))
+    }
+
+    // `extra` is a block of complete `Name: value\r\n` header lines.
+    fn req(ready: &Prepared, method: &str, path: &str, extra: &str, body: &[u8]) -> String {
+        let mut raw = format!(
+            "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{}\r\n",
+            method,
+            path,
+            body.len(),
+            extra
+        )
+        .into_bytes();
+        raw.extend_from_slice(body);
+        roundtrip(ready, &raw)
+    }
+
+    // The response head's headers as (lower-cased name, value).
+    fn resp_headers(resp: &str) -> Vec<(String, String)> {
+        let head = resp.split("\r\n\r\n").next().unwrap();
+        head.lines()
+            .skip(1)
+            .filter_map(|l| l.split_once(": "))
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+            .collect()
+    }
+
+    fn user_meta(resp: &str) -> Vec<(String, String)> {
+        let mut m: Vec<_> = resp_headers(resp)
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("x-amz-meta-"))
+            .collect();
+        m.sort();
+        m
+    }
+
+    fn pairs(p: &[(&str, &str)]) -> Vec<(String, String)> {
+        p.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn put_with_meta(ready: &Prepared) {
+        let resp = req(
+            ready,
+            "PUT",
+            "/buck/obj",
+            "Content-Type: text/plain\r\nX-Amz-Meta-Foo: bar\r\nx-amz-meta-Mixed-Case: Keep Value Case\r\n",
+            b"hello world",
+        );
+        assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
+    }
+
+    #[test]
+    fn put_stores_user_metadata_and_head_get_return_it() {
+        let (ready, _root) = anon_server("headget");
+        put_with_meta(&ready);
+        let want = pairs(&[
+            ("x-amz-meta-foo", "bar"),
+            ("x-amz-meta-mixed-case", "Keep Value Case"),
+        ]);
+
+        let head = req(&ready, "HEAD", "/buck/obj", "", b"");
+        assert!(head.starts_with("HTTP/1.1 200"), "{}", head);
+        assert_eq!(user_meta(&head), want);
+
+        let get = req(&ready, "GET", "/buck/obj", "", b"");
+        assert!(get.starts_with("HTTP/1.1 200"), "{}", get);
+        assert!(get.ends_with("hello world"), "{}", get);
+        assert_eq!(user_meta(&get), want);
+
+        let ranged = req(&ready, "GET", "/buck/obj", "Range: bytes=0-4\r\n", b"");
+        assert!(ranged.starts_with("HTTP/1.1 206"), "{}", ranged);
+        assert!(ranged.ends_with("\r\n\r\nhello"), "{}", ranged);
+        assert_eq!(user_meta(&ranged), want);
+    }
+
+    #[test]
+    fn overwrite_without_metadata_clears_it() {
+        let (ready, _root) = anon_server("overwrite");
+        put_with_meta(&ready);
+        req(&ready, "PUT", "/buck/obj", "", b"again");
+        let head = req(&ready, "HEAD", "/buck/obj", "", b"");
+        assert!(user_meta(&head).is_empty(), "{}", head);
+    }
+
+    #[test]
+    fn versioned_get_returns_that_versions_metadata() {
+        let (ready, _root) = anon_server("versioned");
+        ready
+            .server
+            .storage
+            .set_versioning_status("buck", crate::storage::VersioningStatus::Enabled)
+            .unwrap();
+        put_with_meta(&ready);
+        let first = req(&ready, "HEAD", "/buck/obj", "", b"");
+        let vid = resp_headers(&first)
+            .into_iter()
+            .find(|(k, _)| k == "x-amz-version-id")
+            .map(|(_, v)| v)
+            .expect("version id");
+        req(
+            &ready,
+            "PUT",
+            "/buck/obj",
+            "x-amz-meta-foo: newer\r\n",
+            b"v2",
+        );
+
+        let old = req(
+            &ready,
+            "HEAD",
+            &format!("/buck/obj?versionId={vid}"),
+            "",
+            b"",
+        );
+        assert_eq!(
+            user_meta(&old),
+            pairs(&[
+                ("x-amz-meta-foo", "bar"),
+                ("x-amz-meta-mixed-case", "Keep Value Case"),
+            ])
+        );
+        let latest = req(&ready, "HEAD", "/buck/obj", "", b"");
+        assert_eq!(user_meta(&latest), pairs(&[("x-amz-meta-foo", "newer")]));
+    }
+
+    #[test]
+    fn copy_keeps_metadata_by_default_and_with_copy_directive() {
+        let (ready, _root) = anon_server("copy");
+        put_with_meta(&ready);
+        let want = pairs(&[
+            ("x-amz-meta-foo", "bar"),
+            ("x-amz-meta-mixed-case", "Keep Value Case"),
+        ]);
+        for (dst, directive) in [
+            ("/buck/c1", ""),
+            ("/buck/c2", "x-amz-metadata-directive: COPY\r\n"),
+        ] {
+            // Metadata on a COPY request is ignored, as in S3.
+            let extra =
+                format!("x-amz-copy-source: /buck/obj\r\nx-amz-meta-ignored: x\r\n{directive}");
+            let resp = req(&ready, "PUT", dst, &extra, b"");
+            assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
+            let head = req(&ready, "HEAD", dst, "", b"");
+            assert_eq!(user_meta(&head), want, "{dst}");
+            assert!(head.contains("Content-Type: text/plain"), "{}", head);
+        }
+    }
+
+    #[test]
+    fn copy_with_replace_directive_takes_request_metadata() {
+        let (ready, _root) = anon_server("replace");
+        put_with_meta(&ready);
+        let resp = req(
+            &ready,
+            "PUT",
+            "/buck/c",
+            "x-amz-copy-source: /buck/obj\r\nx-amz-metadata-directive: REPLACE\r\n\
+             Content-Type: application/json\r\nX-Amz-Meta-New: one\r\n",
+            b"",
+        );
+        assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
+        let head = req(&ready, "HEAD", "/buck/c", "", b"");
+        assert_eq!(user_meta(&head), pairs(&[("x-amz-meta-new", "one")]));
+        assert!(head.contains("Content-Type: application/json"), "{}", head);
+        let get = req(&ready, "GET", "/buck/c", "", b"");
+        assert!(get.ends_with("hello world"), "{}", get);
+    }
+
+    #[test]
+    fn copy_with_unknown_directive_is_rejected() {
+        let (ready, _root) = anon_server("baddirective");
+        put_with_meta(&ready);
+        let resp = req(
+            &ready,
+            "PUT",
+            "/buck/c",
+            "x-amz-copy-source: /buck/obj\r\nx-amz-metadata-directive: MERGE\r\n",
+            b"",
+        );
+        assert!(resp.starts_with("HTTP/1.1 400"), "{}", resp);
+        assert!(ready.server.storage.get_object("buck", "c").is_err());
+    }
+
+    #[test]
+    fn multipart_keeps_metadata_from_create() {
+        let (ready, _root) = anon_server("multipart");
+        let init = req(
+            &ready,
+            "POST",
+            "/buck/mp?uploads",
+            "X-Amz-Meta-Origin: multipart\r\n",
+            b"",
+        );
+        assert!(init.starts_with("HTTP/1.1 200"), "{}", init);
+        let from = init.find("<UploadId>").unwrap() + "<UploadId>".len();
+        let to = init.find("</UploadId>").unwrap();
+        let id = &init[from..to];
+
+        let part = req(
+            &ready,
+            "PUT",
+            &format!("/buck/mp?partNumber=1&uploadId={id}"),
+            // Metadata on UploadPart does not reach the object.
+            "x-amz-meta-part: nope\r\n",
+            b"abc",
+        );
+        assert!(part.starts_with("HTTP/1.1 200"), "{}", part);
+        let done = req(
+            &ready,
+            "POST",
+            &format!("/buck/mp?uploadId={id}"),
+            "",
+            b"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber></Part></CompleteMultipartUpload>",
+        );
+        assert!(done.starts_with("HTTP/1.1 200"), "{}", done);
+
+        let head = req(&ready, "HEAD", "/buck/mp", "", b"");
+        assert_eq!(
+            user_meta(&head),
+            pairs(&[("x-amz-meta-origin", "multipart")])
+        );
+    }
 }

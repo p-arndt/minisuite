@@ -3,7 +3,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::http::{AwsChunkedReader, FixedReader, Headers, Request, Response};
-use crate::storage::{valid_bucket, valid_key, Storage, StorageError};
+use crate::storage::{valid_bucket, valid_key, Storage, StorageError, USER_META_PREFIX};
 use crate::url::parse_query;
 use crate::util::{iso8601, request_id, xml_escape};
 
@@ -587,7 +587,8 @@ fn put_object<R: std::io::BufRead>(
         }
     }
 
-    let (etag, size, vid) = match writer.finish(&content_type) {
+    let user_meta = user_metadata(&req.headers);
+    let (etag, size, vid) = match writer.finish(&content_type, &user_meta) {
         Ok(v) => v,
         Err(e) => {
             return error_response(
@@ -645,6 +646,21 @@ fn copy_object(
     if !valid_key(dst_key) {
         return error_response(sock, 400, "InvalidArgument", "invalid key", rid, dst_key);
     }
+    let replace_meta = match headers.get("x-amz-metadata-directive") {
+        None => false,
+        Some(d) if d.eq_ignore_ascii_case("COPY") => false,
+        Some(d) if d.eq_ignore_ascii_case("REPLACE") => true,
+        Some(_) => {
+            return error_response(
+                sock,
+                400,
+                "InvalidArgument",
+                "Unknown metadata directive.",
+                rid,
+                dst_key,
+            )
+        }
+    };
 
     let (meta, mut src_file) = match srv.storage.get_object(&src_bucket, &src_key) {
         Ok(v) => v,
@@ -711,7 +727,20 @@ fn copy_object(
             return error_response(sock, 500, "InternalError", &format!("{}", e), rid, dst_key);
         }
     }
-    let (etag, _size, _vid) = match writer.finish(&meta.content_type) {
+    // REPLACE takes content type and user metadata from the copy request,
+    // exactly like S3; COPY (the default) carries the source's over.
+    let (content_type, user_meta) = if replace_meta {
+        (
+            headers
+                .get("content-type")
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+            user_metadata(headers),
+        )
+    } else {
+        (meta.content_type, meta.user_meta)
+    };
+    let (etag, _size, _vid) = match writer.finish(&content_type, &user_meta) {
         Ok(v) => v,
         Err(e) => {
             return error_response(sock, 500, "InternalError", &format!("{}", e), rid, dst_key)
@@ -728,6 +757,22 @@ fn copy_object(
         now, etag
     );
     write_xml(sock, 200, &body, rid)
+}
+
+// Collects the request's `x-amz-meta-*` headers as (lower-cased name without
+// the prefix, value), sorted by name. S3 treats the names case-insensitively
+// and returns them lower-cased.
+pub fn user_metadata(headers: &Headers) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = headers
+        .map
+        .iter()
+        .filter_map(|(lc, (_, v))| {
+            let name = lc.strip_prefix(USER_META_PREFIX)?;
+            (!name.is_empty()).then(|| (name.to_string(), v.clone()))
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 // Parses `x-amz-copy-source` (`/bucket/key` or `bucket/key`, percent-encoded)
@@ -840,6 +885,9 @@ fn get_object(
         .header("x-amz-request-id", rid);
     if let Some(v) = &meta.version_id {
         resp = resp.header("x-amz-version-id", v);
+    }
+    for (k, v) in &meta.user_meta {
+        resp = resp.header(&format!("{}{}", USER_META_PREFIX, k), v);
     }
     if status == 206 {
         let cr = format!("bytes {}-{}/{}", start, start + length - 1, size);
@@ -1338,9 +1386,9 @@ mod tests {
         let (srv, g) = make_server("delete_objects_traversal");
         srv.storage.create_bucket("buck").unwrap();
         let w = srv.storage.put_object_writer("buck", "keep").unwrap();
-        w.finish("application/octet-stream").unwrap();
+        w.finish("application/octet-stream", &[]).unwrap();
         let w = srv.storage.put_object_writer("buck", "gone").unwrap();
-        w.finish("application/octet-stream").unwrap();
+        w.finish("application/octet-stream", &[]).unwrap();
 
         // Sentinel outside the storage root, reachable via `..` from data/.
         let sentinel = g.0.parent().unwrap().join(format!(

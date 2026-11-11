@@ -36,6 +36,7 @@ It's useful for:
 - **AWS Signature V4** authentication, including `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` chunked uploads.
 - **Buckets**: create, delete, list.
 - **Objects**: PUT, GET, HEAD, DELETE, COPY, range requests, conditional headers.
+- **User metadata**: `x-amz-meta-*` headers are stored and returned (names lower-cased); COPY honours `x-amz-metadata-directive` COPY/REPLACE, multipart keeps the metadata from initiate.
 - **Multipart uploads**: initiate, upload-part, complete, abort, list.
 - **Object tagging**: PUT/GET/DELETE tagging.
 - **Bucket versioning**: enable, suspend, version listings, version-aware GET/DELETE.

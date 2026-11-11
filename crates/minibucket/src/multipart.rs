@@ -147,6 +147,13 @@ pub fn create_multipart(
     writeln!(info, "{}", now)?;
     writeln!(info, "{}", ct)?;
     writeln!(info, "{}", key)?;
+    drop(info);
+    // User metadata lives in its own file: the key in `.info` may itself
+    // contain newlines, so appending lines there would be ambiguous.
+    let mut meta = File::create(dir.join(".user-meta"))?;
+    for (k, v) in crate::s3::user_metadata(headers) {
+        writeln!(meta, "{}: {}", k, crate::http::sanitize_header_value(&v))?;
+    }
 
     let body = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId></InitiateMultipartUploadResult>"#,
@@ -339,7 +346,13 @@ pub fn complete_multipart<R: std::io::BufRead>(
             part_md5s.extend_from_slice(&bytes);
         }
     }
-    let (_etag, _size, _vid) = writer.finish(&content_type)?;
+    let user_meta: Vec<(String, String)> = fs::read_to_string(dir.join(".user-meta"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(": "))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let (_etag, _size, _vid) = writer.finish(&content_type, &user_meta)?;
 
     // S3 multipart ETag: md5(concat(part_md5_bytes)) + "-" + count, hex.
     let final_digest = crate::md5::md5(&part_md5s);
