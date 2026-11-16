@@ -159,7 +159,20 @@ struct Flag {
     apply: fn(&mut State, &str) -> Result<(), String>,
 }
 
-const FLAGS: &[Flag] = &[
+/// Every long flag `parse_args` accepts, with its dashes. The table below must
+/// list the same names; a test keeps the two in step.
+pub const FLAGS: &[&str] = &[
+    "--bind",
+    "--root",
+    "--access-key",
+    "--secret-key",
+    "--credentials",
+    "--region",
+    "--domain",
+    "--anonymous",
+];
+
+const FLAG_TABLE: &[Flag] = &[
     Flag {
         name: "bind",
         takes_value: true,
@@ -286,7 +299,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Config, Cli
         pending_secret: None,
     };
 
-    for f in FLAGS {
+    for f in FLAG_TABLE {
         let name = env_name(f.name);
         if let Ok(v) = env::var(&name) {
             (f.apply)(&mut st, &v).map_err(|e| CliError::usage(format!("{}: {}", name, e)))?;
@@ -312,8 +325,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Config, Cli
         }
         let flag = a
             .strip_prefix("--")
-            .and_then(|n| FLAGS.iter().find(|f| f.name == n))
-            .ok_or_else(|| CliError::usage(format!("unknown arg: {}", a)))?;
+            .and_then(|n| FLAG_TABLE.iter().find(|f| f.name == n))
+            .ok_or_else(|| CliError::usage(util::unknown_argument(&a, FLAGS)))?;
         let value = if flag.takes_value {
             match it.next() {
                 Some(v) => v,
@@ -350,7 +363,21 @@ pub struct Prepared {
     domain: Option<String>,
     // Sorted so the banner is stable run to run (the credential store is a
     // HashMap).
-    access_keys: Vec<String>,
+    keys: Vec<(String, String)>,
+}
+
+/// The startup summary: a `name version` header, then `label  value` rows
+/// aligned to the widest label. Callers order the rows: URLs, credentials,
+/// storage paths, then anything else.
+fn render_banner(header: &str, rows: &[(&str, String)]) -> String {
+    use std::fmt::Write as _;
+    let width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+    let mut s = format!("{header}\n");
+    for (label, value) in rows {
+        // Infallible: writing into a String never fails.
+        let _ = writeln!(s, "  {label:<width$}  {value}");
+    }
+    s
 }
 
 fn err(msg: String) -> io::Error {
@@ -394,8 +421,12 @@ pub fn prepare(cfg: Config) -> io::Result<Prepared> {
     let listener = TcpListener::bind(&cfg.bind)
         .map_err(|e| err(format!("failed to bind {}: {}", cfg.bind, e)))?;
 
-    let mut access_keys: Vec<String> = credentials.map.keys().cloned().collect();
-    access_keys.sort();
+    let mut keys: Vec<(String, String)> = credentials
+        .map
+        .iter()
+        .map(|(access, secret)| (access.clone(), secret.clone()))
+        .collect();
+    keys.sort();
 
     let server = Arc::new(Server {
         storage,
@@ -413,7 +444,7 @@ pub fn prepare(cfg: Config) -> io::Result<Prepared> {
         anonymous: cfg.anonymous,
         region: cfg.region,
         domain: cfg.domain,
-        access_keys,
+        keys,
     })
 }
 
@@ -436,25 +467,51 @@ impl Prepared {
         self.listener.local_addr()
     }
 
+    /// The region requests are signed for.
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+
+    /// The `--domain` enabling virtual-hosted addressing, if one was given.
+    pub fn domain(&self) -> Option<&str> {
+        self.domain.as_deref()
+    }
+
+    /// True with `--anonymous`: request signatures are not checked.
+    pub fn anonymous(&self) -> bool {
+        self.anonymous
+    }
+
+    /// Access keys as the server checks them, sorted by access key id.
+    pub fn credentials(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .server
+            .credentials
+            .map
+            .iter()
+            .map(|(access, secret)| (access.clone(), secret.clone()))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
     /// The multi-line startup banner, including its trailing newline.
     pub fn banner(&self) -> String {
-        let mut s = format!(
-            "minibucket listening on http://{} (root: {})\n",
-            self.bind,
-            self.root.display()
-        );
+        let mut rows: Vec<(&str, String)> = vec![("listen", format!("http://{}", self.bind))];
+        if let Some(d) = &self.domain {
+            rows.push(("domain", format!("*.{} (virtual-hosted)", d)));
+        }
         if self.anonymous {
-            s.push_str("  anonymous mode (no auth required)\n");
+            rows.push(("auth", "anonymous (no auth required)".to_string()));
         } else {
-            s.push_str(&format!("  region: {}\n", self.region));
-            for k in &self.access_keys {
-                s.push_str(&format!("  access-key: {}\n", k));
-            }
-            if let Some(d) = &self.domain {
-                s.push_str(&format!("  virtual-hosted domain: *.{}\n", d));
+            for (access, secret) in &self.keys {
+                rows.push(("access key", access.clone()));
+                rows.push(("secret key", secret.clone()));
             }
         }
-        s
+        rows.push(("root", self.root.display().to_string()));
+        rows.push(("region", self.region.clone()));
+        render_banner(&format!("{} {}", NAME, VERSION), &rows)
     }
 
     /// Run the accept loop. Blocks forever under normal operation.
@@ -862,12 +919,63 @@ mod tests {
         assert_eq!(parse(&["--bind"]).unwrap_err().code, 2);
     }
 
+    fn help_flags(help: &str) -> Vec<&str> {
+        help.lines()
+            .filter_map(|l| l.strip_prefix("  "))
+            .filter_map(|l| l.split_whitespace().next())
+            .filter(|t| t.starts_with("--"))
+            .collect()
+    }
+
+    #[test]
+    fn every_documented_flag_is_listed_and_every_listed_flag_is_in_the_table() {
+        let help = help_text();
+        for flag in help_flags(&help) {
+            if flag == "--help" || flag == "--version" {
+                continue;
+            }
+            assert!(
+                FLAGS.contains(&flag),
+                "{} is in the help but not FLAGS",
+                flag
+            );
+        }
+        let table: Vec<String> = FLAG_TABLE.iter().map(|f| format!("--{}", f.name)).collect();
+        assert_eq!(table.len(), FLAGS.len());
+        for flag in FLAGS {
+            assert!(
+                table.iter().any(|t| t == flag),
+                "{} is in FLAGS but not the table",
+                flag
+            );
+        }
+    }
+
+    #[test]
+    fn a_misspelled_flag_gets_a_hint() {
+        let e = parse(&["--regin", "eu-west-1"]).unwrap_err();
+        assert_eq!(e.code, 2);
+        assert!(
+            e.message
+                .starts_with("minibucket: unknown argument: --regin (did you mean --region?)\n"),
+            "{}",
+            e.message
+        );
+        let e = parse(&["bogus"]).unwrap_err();
+        assert!(
+            e.message
+                .starts_with("minibucket: unknown argument: bogus\n"),
+            "{}",
+            e.message
+        );
+    }
+
     #[test]
     fn env_names_follow_the_scheme() {
         assert_eq!(env_name("bind"), "MINIBUCKET_BIND");
         assert_eq!(env_name("access-key"), "MINIBUCKET_ACCESS_KEY");
         assert_eq!(env_name("credentials"), "MINIBUCKET_CREDENTIALS");
-        for f in FLAGS {
+        for f in FLAG_TABLE {
             assert!(env_name(f.name).starts_with("MINIBUCKET_"));
         }
     }
@@ -917,10 +1025,36 @@ mod tests {
         // Port 0 means the OS picked one, so the listener is really bound.
         assert!(ready.local_addr().unwrap().port() != 0);
         let banner = ready.banner();
-        assert!(banner.starts_with("minibucket listening on http://127.0.0.1:0"));
-        assert!(banner.contains("  access-key: alice\n"));
+        assert!(
+            banner.starts_with(&format!("minibucket {}\n", VERSION)),
+            "{}",
+            banner
+        );
+        assert_eq!(row_value(&banner, "listen"), Some("http://127.0.0.1:0"));
+        assert_eq!(row_value(&banner, "access key"), Some("alice"));
+        assert_eq!(row_value(&banner, "secret key"), Some("pw"));
         assert!(banner.ends_with('\n'));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The value of the first `label  value` row, if any.
+    fn row_value<'a>(banner: &'a str, label: &str) -> Option<&'a str> {
+        banner.lines().find_map(|line| {
+            let rest = line.strip_prefix("  ")?.strip_prefix(label)?;
+            rest.starts_with("  ").then(|| rest.trim_start())
+        })
+    }
+
+    #[test]
+    fn render_banner_aligns_values_to_the_widest_label() {
+        let rows = [
+            ("listen", "http://127.0.0.1:9000".to_string()),
+            ("access key", "minioadmin".to_string()),
+        ];
+        assert_eq!(
+            render_banner("minibucket 0.4.0", &rows),
+            "minibucket 0.4.0\n  listen      http://127.0.0.1:9000\n  access key  minioadmin\n"
+        );
     }
 
     // Prepared is moved into a thread by the minisuite launcher.

@@ -97,6 +97,9 @@ LABEL org.opencontainers.image.title="minicloak" \
 COPY --from=builder --chown=65532:65532 /data /data
 COPY --from=builder /out/minicloak /usr/local/bin/minicloak
 
+# Tells the servers they run in a container: binding 0.0.0.0 is expected
+# there, so the exposure warnings become a single note.
+ENV MINISUITE_CONTAINER=1
 USER 65532:65532
 EXPOSE 9500
 VOLUME ["/data"]
@@ -119,6 +122,9 @@ LABEL org.opencontainers.image.title="minimail" \
 COPY --from=builder --chown=65532:65532 /data /data
 COPY --from=builder /out/minimail /usr/local/bin/minimail
 
+# Tells the servers they run in a container: binding 0.0.0.0 is expected
+# there, so the exposure warnings become a single note.
+ENV MINISUITE_CONTAINER=1
 USER 65532:65532
 EXPOSE 1025 8025
 VOLUME ["/data"]
@@ -140,6 +146,9 @@ LABEL org.opencontainers.image.title="minibucket" \
 COPY --from=builder --chown=65532:65532 /data /data
 COPY --from=builder /out/minibucket /usr/local/bin/minibucket
 
+# Tells the servers they run in a container: binding 0.0.0.0 is expected
+# there, so the exposure warnings become a single note.
+ENV MINISUITE_CONTAINER=1
 USER 65532:65532
 EXPOSE 9000
 VOLUME ["/data"]
@@ -163,6 +172,9 @@ LABEL org.opencontainers.image.title="minisuite" \
 COPY --from=builder --chown=65532:65532 /data /data
 COPY --from=builder /out/minisuite /usr/local/bin/minisuite
 
+# Tells the servers they run in a container: binding 0.0.0.0 is expected
+# there, so the exposure warnings become a single note.
+ENV MINISUITE_CONTAINER=1
 USER 65532:65532
 # minicloak, minibucket, minimail SMTP, minimail HTTP, landing page.
 EXPOSE 9500 9000 1025 8025 9900

@@ -112,6 +112,24 @@ impl std::fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
+/// Every long flag `parse_args` accepts, with its dashes. The table further
+/// down must list the same names; a test keeps the two in step.
+pub const FLAGS: &[&str] = &[
+    "--smtp-bind",
+    "--http-bind",
+    "--root",
+    "--credentials",
+    "--user",
+    "--password",
+    "--anonymous",
+    "--hostname",
+    "--max-size",
+    "--max-messages",
+    "--tls-cert",
+    "--tls-key",
+    "--smtps-bind",
+];
+
 pub const HELP: &str = "\
 minimail — a tiny dev SMTP sink with a web UI + JSON API
 
@@ -160,7 +178,7 @@ struct Flag {
     apply: fn(&mut Builder, &str) -> Result<(), String>,
 }
 
-const FLAGS: &[Flag] = &[
+const FLAG_TABLE: &[Flag] = &[
     Flag {
         name: "smtp-bind",
         takes_value: true,
@@ -326,7 +344,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Config, Cli
         pending_password: None,
     };
 
-    for flag in FLAGS {
+    for flag in FLAG_TABLE {
         if let Ok(v) = env::var(env_name(flag.name)) {
             (flag.apply)(&mut b, &v).map_err(CliError::usage)?;
         }
@@ -350,13 +368,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Config, Cli
             }
             _ => {}
         }
-        let name = match a.strip_prefix("--") {
-            Some(n) => n,
-            None => return Err(CliError::usage(format!("unknown arg: {a}"))),
-        };
-        let flag = match FLAGS.iter().find(|f| f.name == name) {
-            Some(f) => f,
-            None => return Err(CliError::usage(format!("unknown arg: {a}"))),
+        let flag = a
+            .strip_prefix("--")
+            .and_then(|n| FLAG_TABLE.iter().find(|f| f.name == n));
+        let Some(flag) = flag else {
+            return Err(CliError::usage(util::unknown_argument(&a, FLAGS)));
         };
         let value = if flag.takes_value {
             match args.next() {
@@ -433,9 +449,42 @@ pub fn is_loopback_bind(addr: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn port_of(addr: &str) -> u16 {
+    addr.rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The single line that replaces the exposure warning inside a container.
+/// The publish flags are the safeguard there, so they are what gets named.
+fn container_note(ports: &[u16]) -> String {
+    let publish: Vec<String> = ports
+        .iter()
+        .map(|p| format!("-p 127.0.0.1:{p}:{p}"))
+        .collect();
+    format!(
+        "note: listening on 0.0.0.0 inside a container; publish ports on 127.0.0.1 ({}) unless the network is trusted\n",
+        publish.join(" ")
+    )
+}
+
+/// The container images set `MINISUITE_CONTAINER`. Binding 0.0.0.0 is their
+/// normal mode there, so the exposure warning shrinks to a single note.
+fn in_container() -> bool {
+    container_flag(env::var("MINISUITE_CONTAINER").ok().as_deref())
+}
+
+fn container_flag(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 /// The lines appended to the banner when a listener is reachable from the
 /// network while the seeded dev credential is still in use. Empty otherwise.
-fn exposure_warning(cfg: &Config) -> String {
+fn exposure_warning(cfg: &Config, in_container: bool) -> String {
     #[cfg(feature = "tls")]
     let smtps = cfg.smtps_bind.as_deref();
     #[cfg(not(feature = "tls"))]
@@ -451,6 +500,10 @@ fn exposure_warning(cfg: &Config) -> String {
     .collect();
     if exposed.is_empty() || !uses_default_credential(cfg) {
         return String::new();
+    }
+    if in_container {
+        let ports: Vec<u16> = exposed.iter().copied().map(port_of).collect();
+        return container_note(&ports);
     }
     format!(
         "\nWARNING: {} is bound to {} and reachable from other hosts, but:\n  \
@@ -498,6 +551,29 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// The bound SMTP address; its port is what a client has to dial.
+    pub fn smtp_local_addr(&self) -> io::Result<SocketAddr> {
+        self.smtp_listener.local_addr()
+    }
+
+    /// Whether SMTP AUTH and HTTP Basic auth are enforced; false with `--anonymous`.
+    pub fn auth_required(&self) -> bool {
+        self.server.require_auth
+    }
+
+    /// Accounts as the server checks them, sorted by user name.
+    pub fn credentials(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .server
+            .creds
+            .map
+            .iter()
+            .map(|(user, secret)| (user.clone(), secret.clone()))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
     /// The startup banner, with a trailing newline. The caller decides where it
     /// goes (the binary prints it to stderr).
     pub fn banner(&self) -> String {
@@ -583,7 +659,7 @@ pub fn prepare(cfg: Config) -> io::Result<Prepared> {
         http_listener,
         #[cfg(feature = "tls")]
         smtps_listener,
-        banner: banner(&cfg),
+        banner: banner(&cfg, in_container()),
     })
 }
 
@@ -592,35 +668,71 @@ fn bind(addr: &str, what: &str) -> io::Result<TcpListener> {
         .map_err(|e| io::Error::new(e.kind(), format!("bind {what} {addr}: {e}")))
 }
 
-fn banner(cfg: &Config) -> String {
-    use std::fmt::Write as _;
-    let mut s = String::new();
-    // Infallible: writing into a String never fails.
-    let _ = writeln!(s, "minimail {VERSION}");
-    let _ = writeln!(s, "  SMTP  smtp://{}", cfg.smtp_bind);
-    let _ = writeln!(s, "  HTTP  http://{}", cfg.http_bind);
-    let _ = writeln!(s, "  root  {}", cfg.root.display());
-    if cfg.anonymous {
-        let _ = writeln!(s, "  auth  anonymous (no auth)");
-    } else {
-        let _ = writeln!(s, "  auth  {} credential(s)", cfg.creds.map.len());
-    }
-    let _ = writeln!(s, "  hostname  {}", cfg.hostname);
-    let _ = writeln!(s, "  max-size  {} bytes", cfg.max_size);
-    if let Some(n) = cfg.max_messages {
-        let _ = writeln!(s, "  max-messages  {n}");
-    }
+fn banner(cfg: &Config, in_container: bool) -> String {
+    let mut rows: Vec<(&str, String)> = vec![
+        ("smtp", format!("smtp://{}", cfg.smtp_bind)),
+        ("http", format!("http://{}", cfg.http_bind)),
+    ];
     #[cfg(feature = "tls")]
     {
         if let Some(b) = &cfg.smtps_bind {
-            let _ = writeln!(s, "  SMTPS  smtps://{b}");
-        }
-        if cfg.tls_cert.is_some() && cfg.tls_key.is_some() {
-            let _ = writeln!(s, "  tls  enabled (STARTTLS)");
+            rows.push(("smtps", format!("smtps://{b}")));
         }
     }
-    s.push_str(&exposure_warning(cfg));
+    if cfg.anonymous {
+        rows.push(("login", "anonymous (no auth)".to_string()));
+    } else {
+        let mut logins: Vec<String> = cfg
+            .creds
+            .map
+            .iter()
+            .map(|(user, pass)| format!("{user}/{pass}"))
+            .collect();
+        logins.sort();
+        rows.push(("login", logins.join(", ")));
+    }
+    rows.push(("root", cfg.root.display().to_string()));
+    rows.push(("hostname", cfg.hostname.clone()));
+    rows.push(("max-size", human_bytes(cfg.max_size as u64)));
+    if let Some(n) = cfg.max_messages {
+        rows.push(("max-messages", n.to_string()));
+    }
+    #[cfg(feature = "tls")]
+    {
+        if cfg.tls_cert.is_some() && cfg.tls_key.is_some() {
+            rows.push(("tls", "enabled (STARTTLS)".to_string()));
+        }
+    }
+
+    let mut s = render_banner(&format!("{NAME} {VERSION}"), &rows);
+    s.push_str(&exposure_warning(cfg, in_container));
     s
+}
+
+/// The startup summary: a `name version` header, then `label  value` rows
+/// aligned to the widest label. Callers order the rows: URLs, credentials,
+/// storage paths, then anything else.
+fn render_banner(header: &str, rows: &[(&str, String)]) -> String {
+    use std::fmt::Write as _;
+    let width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+    let mut s = format!("{header}\n");
+    for (label, value) in rows {
+        // Infallible: writing into a String never fails.
+        let _ = writeln!(s, "  {label:<width$}  {value}");
+    }
+    s
+}
+
+/// Whole binary units only: a value that is not an exact multiple stays in
+/// bytes, so the banner never rounds a configured limit.
+fn human_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    for (size, unit) in [(KIB * KIB * KIB, "GiB"), (KIB * KIB, "MiB"), (KIB, "KiB")] {
+        if n >= size && n.is_multiple_of(size) {
+            return format!("{} {}", n / size, unit);
+        }
+    }
+    format!("{n} bytes")
 }
 
 /// One accept loop, thread-per-connection, `Arc::clone` per connection. A panicking
@@ -716,12 +828,21 @@ mod tests {
     #[test]
     fn banner_warns_when_exposed_with_the_default_credential() {
         let cfg = parse_args(args(&[])).unwrap();
-        assert!(!banner(&cfg).contains("WARNING"));
+        assert!(!banner(&cfg, false).contains("WARNING"));
 
         let cfg = parse_args(args(&["--http-bind", "0.0.0.0:8025"])).unwrap();
-        let b = banner(&cfg);
+        let b = banner(&cfg, false);
         assert!(b.contains("WARNING") && b.contains("0.0.0.0:8025"), "{}", b);
         assert!(b.contains("minimail/minimail") && b.contains("MINIMAIL_USER"));
+
+        // Same condition inside a container: one note, naming the published port.
+        let b = banner(&cfg, true);
+        assert!(!b.contains("WARNING"), "{}", b);
+        assert!(
+            b.contains("note: ") && b.contains("-p 127.0.0.1:8025:8025"),
+            "{}",
+            b
+        );
 
         // Own credential or anonymous: nothing to warn about.
         let cfg = parse_args(args(&[
@@ -733,9 +854,49 @@ mod tests {
             "b",
         ]))
         .unwrap();
-        assert!(!banner(&cfg).contains("WARNING"));
+        assert!(!banner(&cfg, false).contains("WARNING"));
+        assert!(!banner(&cfg, true).contains("note:"));
         let cfg = parse_args(args(&["--http-bind", "0.0.0.0:8025", "--anonymous"])).unwrap();
-        assert!(!banner(&cfg).contains("WARNING"));
+        assert!(!banner(&cfg, false).contains("WARNING"));
+    }
+
+    /// The value of the first `label  value` row, if any.
+    fn row_value<'a>(banner: &'a str, label: &str) -> Option<&'a str> {
+        banner.lines().find_map(|line| {
+            let rest = line.strip_prefix("  ")?.strip_prefix(label)?;
+            rest.starts_with("  ").then(|| rest.trim_start())
+        })
+    }
+
+    #[test]
+    fn render_banner_aligns_values_to_the_widest_label() {
+        let rows = [
+            ("smtp", "smtp://127.0.0.1:1025".to_string()),
+            ("max-messages", "5".to_string()),
+        ];
+        assert_eq!(
+            render_banner("minimail 0.4.0", &rows),
+            "minimail 0.4.0\n  smtp          smtp://127.0.0.1:1025\n  max-messages  5\n"
+        );
+    }
+
+    #[test]
+    fn human_bytes_uses_only_exact_binary_units() {
+        assert_eq!(human_bytes(26_214_400), "25 MiB");
+        assert_eq!(human_bytes(2048), "2 KiB");
+        assert_eq!(human_bytes(1536), "1536 bytes");
+        assert_eq!(human_bytes(0), "0 bytes");
+    }
+
+    #[test]
+    fn container_flag_accepts_only_the_truthy_spellings() {
+        for v in ["1", "true", "YES", " on "] {
+            assert!(container_flag(Some(v)), "{}", v);
+        }
+        for v in ["", "0", "false", "no", "off", "2"] {
+            assert!(!container_flag(Some(v)), "{}", v);
+        }
+        assert!(!container_flag(None));
     }
 
     #[test]
@@ -830,6 +991,51 @@ mod tests {
         assert!(parse_bool("--anonymous", "maybe").is_err());
     }
 
+    fn help_flags(help: &str) -> Vec<&str> {
+        help.lines()
+            .filter_map(|l| l.strip_prefix("  "))
+            .filter_map(|l| l.split_whitespace().next())
+            .filter(|t| t.starts_with("--"))
+            .collect()
+    }
+
+    #[test]
+    fn every_documented_flag_is_listed_and_every_listed_flag_is_in_the_table() {
+        for flag in help_flags(HELP) {
+            if flag == "--help" || flag == "--version" {
+                continue;
+            }
+            assert!(FLAGS.contains(&flag), "{} is in HELP but not FLAGS", flag);
+        }
+        let table: Vec<String> = FLAG_TABLE.iter().map(|f| format!("--{}", f.name)).collect();
+        assert_eq!(table.len(), FLAGS.len());
+        for flag in FLAGS {
+            assert!(
+                table.iter().any(|t| t == flag),
+                "{} is in FLAGS but not the table",
+                flag
+            );
+        }
+    }
+
+    #[test]
+    fn a_misspelled_flag_gets_a_hint() {
+        let e = parse_args(args(&["--smtp-bnd", "127.0.0.1:1"])).unwrap_err();
+        assert_eq!(e.code, 2);
+        assert!(
+            e.message
+                .starts_with("unknown argument: --smtp-bnd (did you mean --smtp-bind?)\n"),
+            "{}",
+            e.message
+        );
+        let e = parse_args(args(&["bogus"])).unwrap_err();
+        assert!(
+            e.message.starts_with("unknown argument: bogus\n"),
+            "{}",
+            e.message
+        );
+    }
+
     #[test]
     fn env_names() {
         assert_eq!(env_name("smtp-bind"), "MINIMAIL_SMTP_BIND");
@@ -838,11 +1044,14 @@ mod tests {
     }
 
     #[test]
-    fn banner_ends_with_newline() {
+    fn banner_is_aligned_and_ends_with_newline() {
         let cfg = parse_args(args(&[])).unwrap();
-        let b = banner(&cfg);
-        assert!(b.starts_with("minimail "));
+        let b = banner(&cfg, false);
+        assert!(b.starts_with(&format!("minimail {VERSION}\n")), "{}", b);
         assert!(b.ends_with('\n'));
-        assert!(b.contains("  SMTP  smtp://127.0.0.1:1025\n"));
+        assert_eq!(row_value(&b, "smtp"), Some("smtp://127.0.0.1:1025"));
+        assert_eq!(row_value(&b, "login"), Some("minimail/minimail"));
+        assert_eq!(row_value(&b, "max-size"), Some("25 MiB"));
+        assert!(!b.contains("development tool"), "{}", b);
     }
 }

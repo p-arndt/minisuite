@@ -1,52 +1,51 @@
-# minisuite.toml  (pass with  minisuite --config minisuite.toml,
-#                  or drop it next to the binary as ./minisuite.toml)
+# minisuite.toml — written by `minisuite init`. Everything is commented out, so
+# this file changes nothing until you uncomment a line. minisuite reads
+# ./minisuite.toml by itself; use `minisuite --config FILE` for another path.
 #
-# minisuite runs minicloak, minimail and minibucket in one process. It does not
-# define any flags of its own for them: every key below is that crate's CLI flag
-# with the leading dashes removed, and minisuite simply rebuilds the command line
-# and hands it to the crate. So the authoritative list of keys for a section is
-# the output of `minicloak --help`, `minimail --help` or `minibucket --help`.
+#   [minisuite]                            the suite: data dir, binds, landing page
+#   [minicloak] [minimail] [minibucket]    one section per service
 #
-# Conversion rules
-#   key = "value"     ->  --key value
-#   key = 1234        ->  --key 1234
-#   key = ["a", "b"]  ->  --key a --key b     (for repeatable flags)
-#   key = true        ->  --key               (a bare on/off flag)
-#   key = false       ->  nothing at all      (but still suppresses the
-#                                              matching minisuite default)
-#   key_with_underscores and key-with-dashes are the same key.
+# A service key is that service's CLI flag without the dashes (`minicloak --help`
+# lists them all; smtp_bind and smtp-bind are the same key):
+#   key = "value"  ->  --key value        key = ["a", "b"]  ->  --key a --key b
+#   key = true     ->  --key              key = false       ->  (left out)
 #
-# Relative paths (config, key, root, credentials, tls-cert, tls-key) resolve
-# against the directory THIS FILE lives in, not the working directory.
+# Precedence, highest first: command-line flag > environment variable > this
+# file > default. Relative paths resolve against the directory of this file.
 #
-# Precedence per service, highest first:
-#   1. this file
-#   2. the service's own environment  (MINICLOAK_*, MINIMAIL_*, MINIBUCKET_*)
-#   3. minisuite's defaults           (the --data layout; --bind-all binds)
-#   4. the crate's own defaults
-# A minisuite default is skipped whenever this file sets that key or the matching
-# service environment variable is set — so
-#   MINIMAIL_SMTP_BIND=0.0.0.0:2525 minisuite --bind-all
-# really does move SMTP to 2525 instead of being overridden back to 1025.
-#
-# This file is a real (small) TOML subset: '#' comments, quoted strings,
-# true/false, integers and arrays. Inline tables, [[arrays of tables]], floats
-# and multi-line strings are rejected with a line number. An unknown section is
-# an error, so a typo like [minimails] never silently does nothing.
-#
-# The credentials below are DEV DEFAULTS and deliberately trivial. Do not expose
-# these servers to a network you do not trust.
-#
-# Shipped in the release archive next to the binaries.
+# The credentials below are trivial dev defaults. Do not expose these servers to
+# a network you do not trust.
+
+# ---------------------------------------------------------------------------
+# minisuite — the suite's own options
+# ---------------------------------------------------------------------------
+[minisuite]
+# State directory for the minicloak key, the minimail spool and the minibucket
+# objects. Relative to THIS file. Default ./data.
+# data = "data"
+
+# Bind every service on 0.0.0.0 instead of 127.0.0.1. minisuite prints a warning
+# about the dev credentials when this is on.
+# bind_all = false
+
+# Address of the landing page. Default 127.0.0.1:9900, or 0.0.0.0:9900 with
+# bind_all.
+# landing_bind = "127.0.0.1:9900"
+
+# Serve the landing page that links the three services.
+# landing = true
+
+# Run only some services, as a list. Default: all three.
+# only = ["minicloak", "minimail", "minibucket"]
 
 # ---------------------------------------------------------------------------
 # minicloak — OpenID Connect provider (default :9500)
 # ---------------------------------------------------------------------------
 [minicloak]
-bind = "127.0.0.1:9500"
+# bind = "127.0.0.1:9500"
 
 # The realm name that appears in the issuer URL: http://<host>/realms/<realm>.
-realm = "dev"
+# realm = "dev"
 
 # Pin the issuer instead of deriving it from each request's Host header. Useful
 # when a container and your browser disagree about what "localhost" means.
@@ -58,7 +57,7 @@ realm = "dev"
 
 # ...or inline, one spec per array element:
 #   username=password:email:First Last:role1,role2
-user = ["alice=alice", "bob=bob"]
+# user = ["alice=alice", "bob=bob"]
 
 # client_id=secret:redirect_uri[,uri...]   (secret `public` marks a PKCE client)
 # client = ["myapp=s3cret:http://localhost:3000/*", "spa=public:http://localhost:5173/*"]
@@ -86,15 +85,15 @@ user = ["alice=alice", "bob=bob"]
 # ---------------------------------------------------------------------------
 [minimail]
 # Underscores or dashes, whichever you prefer: smtp_bind == smtp-bind.
-smtp_bind = "127.0.0.1:1025"
-http_bind = "127.0.0.1:8025"
+# smtp_bind = "127.0.0.1:1025"
+# http_bind = "127.0.0.1:8025"
 
 # Without this key, minisuite uses <data>/minimail as the spool.
 # root = "mail"
 
 # Credentials for SMTP AUTH and HTTP Basic. Use `anonymous` instead for a sink
 # that accepts anything from anyone — which is what most dev setups want.
-anonymous = true
+# anonymous = true
 # user = "minimail"
 # password = "minimail"
 
@@ -106,14 +105,14 @@ anonymous = true
 # minibucket — S3-compatible object storage (default :9000)
 # ---------------------------------------------------------------------------
 [minibucket]
-bind = "127.0.0.1:9000"
+# bind = "127.0.0.1:9000"
 
 # Without this key, minisuite uses <data>/minibucket as the object root.
 # root = "objects"
 
 # The single built-in key pair. Both halves are required together.
-access_key = "minioadmin"
-secret_key = "minioadmin"
+# access_key = "minioadmin"
+# secret_key = "minioadmin"
 
 # region = "us-east-1"
 
